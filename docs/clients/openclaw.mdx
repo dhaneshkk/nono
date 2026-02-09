@@ -1,0 +1,234 @@
+---
+title: OpenClaw
+description: Sandboxing OpenClaw gateway and agents with nono
+---
+
+[OpenClaw](https://openclaw.ai) is a multi-channel AI agent platform that enables chat interactions across WhatsApp, Telegram, Discord, and Mattermost. Running OpenClaw under nono provides OS-level isolation that cannot be bypassed.
+
+## Quick Start
+
+```bash
+nono run --profile openclaw -- openclaw gateway
+```
+
+The built-in `openclaw` profile provides:
+- **Read-only access** to the current working directory (Node.js requires this at startup)
+- **Read+write access** to `~/.openclaw` and `~/.config/openclaw` (agent config and state)
+- **Read+write access** to `~/.local` (OpenClaw data/state)
+- **Read+write access** to `$TMPDIR/openclaw-$UID` (temporary files)
+- **Network access** enabled (required for messaging APIs)
+
+## Why Sandbox OpenClaw?
+
+OpenClaw agents receive messages from external users and can execute commands on the host system. Without proper isolation:
+
+- A malicious message could trick an agent into accessing sensitive files
+- Compromised agent code could exfiltrate credentials from `~/.openclaw/`
+- An agent could be used as a pivot point to attack other systems on the network
+
+nono's kernel-enforced sandbox ensures that even if an agent is compromised, it cannot exceed its granted capabilities.
+
+<Note>
+nono has already proven capable of stopping some nasty reported CVEs from exploiting live systems, as its protections are impossible to overide
+</Note>
+
+## Custom Profile
+
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.toml`:
+
+```bash
+mkdir -p ~/.config/nono/profiles
+```
+
+```toml
+[meta]
+name = "openclaw-strict"
+version = "1.0.0"
+description = "OpenClaw with read-only config access"
+
+[filesystem]
+allow = ["$WORKDIR"]
+read = ["$HOME/.openclaw", "$HOME/.config/openclaw"]
+
+[network]
+block = false  # Required for messaging APIs
+
+[secrets]
+# Load credentials from system keystore instead of files
+telegram_bot_token = "TELEGRAM_BOT_TOKEN"
+openai_api_key = "OPENAI_API_KEY"
+```
+
+**Usage (custom profiles require `--trust-unsigned`):**
+```bash
+nono run --profile openclaw-strict --trust-unsigned --secrets -- openclaw gateway
+```
+
+<Note>
+Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.toml`, it will be used instead of the built-in.
+</Note>
+
+See [Security Profiles](/security/profiles) for the full profile format reference.
+
+## Security Tips
+
+### Protect Credentials
+
+OpenClaw stores sensitive data in `~/.openclaw/` including:
+- Channel authentication tokens (WhatsApp sessions, Telegram bot tokens)
+- OAuth credentials
+- API keys for AI providers
+
+The built-in profile grants **read+write** access to this directory so OpenClaw can update its state. If you need stricter isolation, use a custom profile with read-only access (see the custom profile example above).
+
+For maximum security, use nono's secrets management to load API keys from the system keystore. This keeps credentials out of config files and environment variable exports where they could be leaked.
+
+**Step 1: Store your secrets**
+
+OpenClaw typically needs a messaging platform token (e.g., Telegram) and an AI provider API key. Store these in the system keystore:
+
+**macOS:**
+```bash
+# Store Telegram bot token
+security add-generic-password -s "nono" -a "telegram_bot_token" -w
+
+# Store OpenAI API key
+security add-generic-password -s "nono" -a "openai_api_key" -w
+
+# Or store Anthropic API key instead
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+
+**Linux:**
+```bash
+# Store Telegram bot token
+secret-tool store --label="nono: telegram_bot_token" service nono username telegram_bot_token
+
+# Store OpenAI API key
+secret-tool store --label="nono: openai_api_key" service nono username openai_api_key
+```
+
+**Step 2: Run OpenClaw with secrets loaded**
+
+```bash
+nono run --profile openclaw --secrets telegram_bot_token,openai_api_key -- openclaw gateway
+```
+
+The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` and `$OPENAI_API_KEY` environment variables. OpenClaw reads these automatically.
+
+<Note>
+Secrets are loaded **before** the sandbox is applied, then zeroized from nono's memory after `exec()`. The sandboxed process cannot access the keystore directly - it only receives the specific secrets you authorized.
+</Note>
+
+See [Secrets Management](/usage/secrets) for complete documentation on storing and managing secrets.
+
+### Limit Agent Filesystem Access
+
+The built-in profile grants access to OpenClaw's config directories. To also grant access to a project directory:
+
+```bash
+# Restrict to specific project directory only
+nono run --profile openclaw --allow ~/projects/my-agent -- openclaw gateway
+
+# Block all writes, read-only mode
+nono run --profile openclaw --read . -- openclaw gateway
+```
+
+### Network Considerations
+
+OpenClaw requires network access to communicate with:
+- Messaging platform APIs (WhatsApp, Telegram, Discord, Mattermost)
+- AI provider APIs (OpenAI, Anthropic, etc.)
+- Optional web search APIs (Brave Search)
+
+The profile allows full network access. Future nono versions will support per-host filtering to restrict connections to only required endpoints.
+
+### Running as a Daemon
+
+When running OpenClaw as a system service, wrap the daemon command with nono:
+
+**macOS (launchd):**
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/usr/local/bin/nono</string>
+  <string>run</string>
+  <string>--profile</string>
+  <string>openclaw</string>
+  <string>--</string>
+  <string>openclaw</string>
+  <string>daemon</string>
+</array>
+```
+
+**Linux (systemd):**
+```ini
+[Service]
+ExecStart=/usr/local/bin/nono run --profile openclaw -- openclaw daemon
+```
+
+### Combine with OpenClaw's Built-in Sandbox
+
+OpenClaw has its own sandboxing option for group/channel sessions. Layer both for defense in depth:
+
+1. **nono**: OS-level isolation (Landlock/Seatbelt) - cannot be bypassed by code
+2. **OpenClaw sandbox**: Application-level isolation - easier to configure per-agent
+
+```bash
+# Both layers active
+nono run --profile openclaw -- openclaw gateway --sandbox
+```
+
+## Strict Mode Example
+
+For high-security deployments where agents should have minimal access:
+
+```bash
+nono run \
+  --read ~/.openclaw \
+  --read ~/agents/my-agent \
+  --allow ~/agents/my-agent/workspace \
+  --secrets telegram_bot_token,openai_api_key \
+  -- openclaw gateway
+```
+
+This configuration:
+- Reads config from `~/.openclaw` (no writes)
+- Reads agent code from `~/agents/my-agent`
+- Only allows writes to the workspace subdirectory
+- Loads `$TELEGRAM_BOT_TOKEN` and `$OPENAI_API_KEY` from the system keystore
+
+## Already Using Containers?
+
+If you're running OpenClaw in Docker or Podman, you already have solid isolation. Containers provide process isolation, resource limits, and filesystem separation that protect your host system.
+
+That said, there are tradeoffs to consider:
+
+| Aspect | nono | Containers |
+|--------|------|------------|
+| Startup overhead | ~0ms | ~100-500ms |
+| Host file access | Direct | Requires volume mounts |
+| Credential blocking | Automatic | Manual (don't mount ~/.ssh, etc.) |
+| Resource limits | No | Yes |
+| Environment isolation | No | Yes |
+
+**When containers make more sense:**
+- You need CPU/memory limits to prevent runaway agents
+- You want a reproducible environment across machines
+- You're already using container orchestration (Kubernetes, etc.)
+
+**When nono makes more sense:**
+- You need fast startup for interactive use
+- You want to work directly on host files without volume mount complexity
+- You want automatic credential protection without manual configuration
+- You want protection from destructive commands like `rm -rf`, `dd`, and `chmod`
+
+**For maximum security, use both:**
+
+```bash
+# nono inside a container - defense in depth
+docker run -v $(pwd):/work my-openclaw-image \
+  nono run --profile openclaw -- openclaw gateway
+```
+
+See [nono vs Containers](/security/vs-containers) for a detailed comparison.

@@ -1,0 +1,34 @@
+[package]
+name = "nono"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Capability-based sandboxing library using Landlock (Linux) and Seatbelt (macOS)"
+keywords = ["sandbox", "security", "capability", "landlock", "seatbelt"]
+categories = ["os", "api-bindings"]
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+# Keychain access
+keyring = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+nix = { version = "0.29", features = ["fs", "user"] }
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.29", features = ["fs", "user"] }
+keyring = { version = "3", features = ["apple-native"] }
+
+[dev-dependencies]
+tempfile.workspace = true

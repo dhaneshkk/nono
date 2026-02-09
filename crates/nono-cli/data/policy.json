@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "version": 2,
+    "schema_version": "2.0"
+  },
+  "groups": {
+    "deny_credentials": {
+      "description": "Block access to cryptographic keys, tokens, and cloud credentials",
+      "deny": {
+        "access": [
+          "~/.ssh",
+          "~/.gnupg",
+          "~/.aws",
+          "~/.azure",
+          "~/.config/gcloud",
+          "~/.gcloud",
+          "~/.kube",
+          "~/.docker",
+          "~/.git-credentials",
+          "~/.netrc",
+          "~/.npmrc",
+          "~/.vault-token",
+          "~/.credentials",
+          "~/.secrets",
+          "~/.keys",
+          "~/.pki",
+          "~/.terraform.d"
+        ]
+      }
+    },
+    "deny_keychains_macos": {
+      "description": "Block access to macOS keychains and password stores",
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Keychains",
+          "/Library/Keychains",
+          "~/.password-store",
+          "~/.1password"
+        ]
+      }
+    },
+    "deny_keychains_linux": {
+      "description": "Block access to Linux keyrings and password stores",
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.password-store",
+          "~/.1password",
+          "~/.local/share/keyrings"
+        ]
+      }
+    },
+    "deny_browser_data_macos": {
+      "description": "Block access to macOS browser stored data (cookies, saved passwords, sessions)",
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Application Support/Google/Chrome",
+          "~/Library/Application Support/Firefox",
+          "~/Library/Application Support/Microsoft Edge",
+          "~/Library/Application Support/Arc",
+          "~/Library/Application Support/Brave Browser",
+          "~/Library/Safari"
+        ]
+      }
+    },
+    "deny_browser_data_linux": {
+      "description": "Block access to Linux browser stored data (cookies, saved passwords, sessions)",
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.config/google-chrome",
+          "~/.config/chromium",
+          "~/.mozilla/firefox",
+          "~/.config/microsoft-edge",
+          "~/.config/BraveSoftware"
+        ]
+      }
+    },
+    "deny_macos_private": {
+      "description": "Block access to macOS private data (messages, mail, cookies)",
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Messages",
+          "~/Library/Mail",
+          "~/Library/Cookies",
+          "~/Library/Containers/com.apple.Safari",
+          "~/Library/Application Support/MobileSync"
+        ]
+      }
+    },
+    "deny_shell_history": {
+      "description": "Block access to shell command history files",
+      "deny": {
+        "access": [
+          "~/.bash_history",
+          "~/.zsh_history",
+          "~/.history",
+          "~/.python_history"
+        ]
+      }
+    },
+    "deny_shell_configs": {
+      "description": "Block access to shell configuration files that may embed secrets",
+      "deny": {
+        "access": [
+          "~/.zshrc",
+          "~/.zprofile",
+          "~/.zshenv",
+          "~/.zlogin",
+          "~/.zlogout",
+          "~/.bashrc",
+          "~/.bash_profile",
+          "~/.bash_login",
+          "~/.bash_logout",
+          "~/.profile",
+          "~/.config/fish",
+          "~/.env",
+          "~/.envrc"
+        ]
+      }
+    },
+    "system_read_macos": {
+      "description": "macOS system paths required for executables to function",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/usr/lib",
+          "/usr/local/lib",
+          "/usr/share",
+          "/System/Library",
+          "/Library",
+          "/Library/Frameworks",
+          "/dev",
+          "/private/var/db/dyld",
+          "/var/db/dyld",
+          "/var/db",
+          "/private/etc/ssl",
+          "/etc/ssl",
+          "/etc",
+          "/private/etc",
+          "/usr/share/zoneinfo",
+          "/usr/share/locale",
+          "/var/db/timezone",
+          "/usr/share/terminfo",
+          "/var",
+          "/private/var",
+          "/private",
+          "/tmp",
+          "/System/Volumes",
+          "/Applications",
+          "/cores",
+          "/opt",
+          "/Volumes"
+        ]
+      },
+      "symlink_pairs": {
+        "/etc": "/private/etc",
+        "/var": "/private/var",
+        "/tmp": "/private/tmp"
+      }
+    },
+    "system_read_linux": {
+      "description": "Linux system paths required for executables to function",
+      "platform": "linux",
+      "allow": {
+        "read": [
+          "/bin",
+          "/sbin",
+          "/usr/bin",
+          "/usr/sbin",
+          "/usr/local/bin",
+          "/lib",
+          "/lib64",
+          "/lib/x86_64-linux-gnu",
+          "/lib/aarch64-linux-gnu",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+          "/usr/lib/aarch64-linux-gnu",
+          "/usr/local/lib",
+          "/usr/local/lib64",
+          "/etc",
+          "/usr/share",
+          "/usr/share/locale",
+          "/usr/share/locale-langpack",
+          "/usr/share/zoneinfo",
+          "/usr/share/terminfo",
+          "/usr/share/ca-certificates",
+          "/lib/terminfo",
+          "/etc/terminfo",
+          "/dev/null",
+          "/dev/zero",
+          "/dev/random",
+          "/dev/urandom",
+          "/dev/full",
+          "/dev/tty",
+          "/dev/console",
+          "/dev/stdin",
+          "/dev/stdout",
+          "/dev/stderr",
+          "/dev/fd",
+          "/dev/pts",
+          "/proc",
+          "/sys",
+          "/run",
+          "/var/run",
+          "/tmp",
+          "/nix"
+        ]
+      }
+    },
+    "system_write_macos": {
+      "description": "macOS paths requiring write for temp files and devices",
+      "platform": "macos",
+      "allow": {
+        "write": [
+          "/private/tmp",
+          "/tmp",
+          "/private/var/folders",
+          "/var/folders",
+          "/dev",
+          "$TMPDIR"
+        ]
+      }
+    },
+    "system_write_linux": {
+      "description": "Linux paths requiring write for temp files and devices",
+      "platform": "linux",
+      "allow": {
+        "write": [
+          "/tmp",
+          "/dev/null",
+          "/dev/zero",
+          "/dev/full",
+          "/dev/tty",
+          "/dev/pts",
+          "$TMPDIR"
+        ]
+      }
+    },
+    "user_caches_macos": {
+      "description": "User cache, log, and preference directories for macOS programs",
+      "platform": "macos",
+      "allow": {
+        "readwrite": [
+          "~/Library/Caches",
+          "~/Library/Logs"
+        ],
+        "read": [
+          "~/Library/Preferences"
+        ]
+      }
+    },
+    "user_tools": {
+      "description": "User-local executables and tool directories",
+      "allow": {
+        "read": [
+          "~/.local/bin",
+          "~/.local/share",
+          "~/.local/state"
+        ]
+      }
+    },
+    "node_runtime": {
+      "description": "Node.js runtime and package manager paths",
+      "allow": {
+        "read": [
+          "~/.nvm",
+          "~/.fnm",
+          "~/.npm",
+          "~/.node",
+          "/usr/local/lib/node_modules"
+        ]
+      }
+    },
+    "python_runtime": {
+      "description": "Python runtime paths",
+      "allow": {
+        "read": [
+          "~/.pyenv",
+          "~/.local/lib",
+          "~/.conda"
+        ]
+      }
+    },
+    "rust_runtime": {
+      "description": "Rust toolchain paths",
+      "allow": {
+        "read": [
+          "~/.cargo",
+          "~/.rustup"
+        ]
+      }
+    },
+    "go_runtime": {
+      "description": "Go toolchain paths",
+      "allow": {
+        "read": [
+          "~/go",
+          "/usr/local/go"
+        ]
+      }
+    },
+    "homebrew": {
+      "description": "Homebrew installation paths",
+      "platform": "macos",
+      "allow": {
+        "read": [
+          "/opt/homebrew",
+          "/usr/local/Cellar",
+          "/usr/local/opt"
+        ]
+      }
+    },
+    "unlink_protection": {
+      "description": "Block file deletion globally, override for user-writable paths",
+      "deny": {
+        "unlink": true,
+        "unlink_override_for_user_writable": true
+      }
+    },
+    "dangerous_commands": {
+      "description": "Cross-platform commands blocked by default to prevent destructive actions",
+      "deny": {
+        "commands": [
+          "rm",
+          "rmdir",
+          "dd",
+          "chmod",
+          "chown",
+          "chgrp",
+          "mv",
+          "cp",
+          "truncate",
+          "scp",
+          "rsync",
+          "sftp",
+          "ftp",
+          "xargs",
+          "sudo",
+          "su",
+          "doas",
+          "pip",
+          "shutdown",
+          "reboot",
+          "halt",
+          "poweroff"
+        ]
+      }
+    },
+    "dangerous_commands_macos": {
+      "description": "macOS-specific commands blocked by default",
+      "platform": "macos",
+      "deny": {
+        "commands": [
+          "srm",
+          "brew",
+          "launchctl"
+        ]
+      }
+    },
+    "dangerous_commands_linux": {
+      "description": "Linux-specific commands blocked by default",
+      "platform": "linux",
+      "deny": {
+        "commands": [
+          "shred",
+          "mkfs",
+          "mkfs.ext4",
+          "mkfs.xfs",
+          "mkfs.btrfs",
+          "mkswap",
+          "fdisk",
+          "parted",
+          "gdisk",
+          "wipefs",
+          "chattr",
+          "init",
+          "systemctl",
+          "apt",
+          "apt-get",
+          "dpkg",
+          "yum",
+          "dnf",
+          "pacman",
+          "pkexec"
+        ]
+      }
+    }
+  }
+}

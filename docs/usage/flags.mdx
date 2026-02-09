@@ -1,0 +1,506 @@
+---
+title: CLI Reference
+description: Complete reference for all nono command-line flags
+---
+
+Complete reference for all nono command-line flags.
+
+## Global Options
+
+These options work with all commands.
+
+### `--silent`, `-s`
+
+Suppress all nono output (banner, summary, status messages). Only the executed command's output will be shown.
+
+```bash
+nono -s run --allow . -- my-agent
+nono --silent why --path ~/.ssh/id_rsa --op read
+```
+
+## Commands
+
+### `nono run`
+
+Run a command inside the sandbox.
+
+```bash
+nono run [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+### `nono shell`
+
+Start an interactive shell inside the sandbox.
+
+```bash
+nono shell [OPTIONS]
+```
+
+### `nono why`
+
+Check why a path or network operation would be allowed or denied. Designed for both human debugging and programmatic use by AI agents.
+
+```bash
+nono why --path <PATH> --op <OP> [OPTIONS]
+nono why --host <HOST> [--port <PORT>] [OPTIONS]
+nono why --self --path <PATH> --op <OP> [OPTIONS]  # Inside sandbox
+```
+
+### `nono learn`
+
+Trace a command to discover required filesystem paths. Uses strace to monitor file accesses and outputs paths that would need to be allowed in a nono profile. (Linux only)
+
+```bash
+nono learn [OPTIONS] -- <COMMAND> [ARGS...]
+```
+
+### `nono setup`
+
+Set up nono on this system. Verifies installation, tests sandbox support, and optionally generates example profiles.
+
+```bash
+nono setup [OPTIONS]
+```
+
+## `nono learn` Options
+
+<Note>
+  `nono learn` is only available on Linux as it requires strace. The command runs WITHOUT sandbox restrictions to discover what paths your application needs.
+</Note>
+
+### `--profile`, `-p`
+
+Compare against an existing profile to show only missing paths.
+
+```bash
+nono learn --profile opencode -- opencode
+```
+
+### `--toml`
+
+Output discovered paths as a TOML fragment suitable for a profile.
+
+```bash
+nono learn --toml -- my-app > paths.toml
+```
+
+### `--timeout`
+
+Limit trace duration in seconds.
+
+```bash
+nono learn --timeout 30 -- my-long-running-app
+```
+
+### `--all`
+
+Show all accessed paths, not just those that would be blocked by the sandbox.
+
+```bash
+nono learn --all -- my-app
+```
+
+### `--trust-unsigned`
+
+Trust unsigned user profiles when using `--profile`.
+
+```bash
+nono learn --profile my-custom-profile --trust-unsigned -- my-app
+```
+
+### `--verbose`, `-v`
+
+Enable verbose output. Can be specified multiple times.
+
+```bash
+nono learn -vv -- my-app
+```
+
+## `nono run` Options
+
+### Directory Permissions
+
+These flags grant recursive access to directories and all their contents.
+
+#### `--allow`, `-a`
+
+Grant read and write access to a directory.
+
+```bash
+nono run --allow ./project -- command
+nono run -a ./src -a ./tests -- command
+```
+
+Can be specified multiple times to allow multiple directories.
+
+#### `--read`, `-r`
+
+Grant read-only access to a directory.
+
+```bash
+nono run --read ./config -- command
+nono run -r /etc/myapp -- command
+```
+
+Useful for source code directories that shouldn't be modified.
+
+#### `--write`, `-w`
+
+Grant write-only access to a directory.
+
+```bash
+nono run --write ./output -- command
+nono run -w ./logs -- command
+```
+
+Useful for output directories where reading existing content isn't needed.
+
+### File Permissions
+
+These flags grant access to individual files only (non-recursive).
+
+#### `--allow-file`
+
+Grant read and write access to a single file.
+
+```bash
+nono run --allow-file ./database.sqlite -- command
+```
+
+#### `--read-file`
+
+Grant read-only access to a single file.
+
+```bash
+nono run --read-file ./config.toml -- command
+nono run --read-file ~/.gitconfig -- command
+```
+
+#### `--write-file`
+
+Grant write-only access to a single file.
+
+```bash
+nono run --write-file ./output.log -- command
+```
+
+### Network Control
+
+#### `--net-block`
+
+Block all network access. Network is **allowed by default**.
+
+```bash
+# Block network for a build process that should be offline
+nono run --allow . --net-block -- cargo build
+```
+
+<Note>
+  Network access is currently binary - either all outbound connections are allowed, or all are blocked. There is no per-host or per-domain filtering.
+
+  Granular network filtering (e.g., allowing only specific domains like `api.anthropic.com`) is a desired feature but not yet supported. Apple Seatbelt has technical limitations that make per-host filtering challenging and would require significant experimentation to implement correctly. This feature may be added in a future release.
+</Note>
+
+## `nono shell` Options
+
+`nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
+
+### `--shell`
+
+Override the shell binary.
+
+```bash
+nono shell --allow . --shell /bin/zsh
+```
+
+### Command Blocking
+
+#### `--allow-command`
+
+Allow a normally-blocked dangerous command. By default, destructive commands like `rm`, `dd`, `chmod` are blocked. Use this flag to override for a specific command.
+
+```bash
+# Allow rm (blocked by default)
+nono run --allow . --allow-command rm -- rm ./temp-file.txt
+
+# Allow multiple commands
+nono run --allow . --allow-command rm --allow-command mv -- my-script.sh
+```
+
+<Note>
+  Even with `--allow-command`, the kernel sandbox still restricts file operations to granted paths. A command can only affect files within directories you explicitly allowed.
+</Note>
+
+#### `--block-command`
+
+Block an additional command beyond the default blocklist.
+
+```bash
+# Block a custom tool in addition to defaults
+nono run --allow . --block-command my-dangerous-tool -- my-script.sh
+```
+
+### Secrets Options
+
+#### `--secrets`
+
+Load secrets from the system keystore (macOS Keychain / Linux Secret Service) and inject them as environment variables.
+
+```bash
+# Load specific secrets by account name
+nono run --allow . --secrets openai_api_key,anthropic_api_key -- my-agent
+
+# Use with profile (loads secrets defined in profile's [secrets] section)
+nono run --profile claude-code --secrets -- claude
+```
+
+Secrets are:
+
+- Loaded **before** the sandbox is applied (keystore access blocked after)
+- Auto-named by uppercasing: `openai_api_key` becomes `$OPENAI_API_KEY`
+- Zeroized from memory after `exec()`
+
+See [Secrets Management](secrets.md) for full documentation on storing and using secrets.
+
+### Profile Options
+
+#### `--profile`, `-p`
+
+Use a named profile (built-in or from `~/.config/nono/profiles/`).
+
+```bash
+nono run --profile claude-code -- claude
+nono run -p openclaw -- openclaw gateway
+```
+
+#### `--workdir`
+
+Working directory for `$WORKDIR` expansion in profiles (defaults to current directory).
+
+```bash
+nono run --profile claude-code --workdir ./my-project -- claude
+```
+
+#### `--allow-cwd`
+
+Allow access to the current working directory without prompting. By default, nono prompts interactively for CWD sharing. The access level is determined by the profile's `[workdir]` config or defaults to read-only.
+
+```bash
+# Non-interactive mode (e.g., CI/CD)
+nono run --profile claude-code --allow-cwd -- claude
+
+# Silent mode requires --allow-cwd (cannot prompt)
+nono -s run --profile claude-code --allow-cwd -- claude
+```
+
+#### `--trust-unsigned`
+
+Trust unsigned user profiles. Required for profiles without signatures.
+
+```bash
+nono run --profile my-custom-profile --trust-unsigned -- command
+```
+
+### Operational Flags
+
+#### `--dry-run`
+
+Show what capabilities would be granted without actually executing the command or applying the sandbox.
+
+```bash
+nono run --allow . --read /etc --dry-run -- my-agent
+```
+
+Output:
+```
+Capabilities that would be granted:
+  [rw] /Users/luke/project
+  [r-] /etc
+  [net] allowed
+
+Would execute: my-agent
+```
+
+#### `--verbose`, `-v`
+
+Increase logging verbosity. Can be specified multiple times.
+
+| Flag | Level | Output |
+|------|-------|--------|
+| (none) | Error | Only errors |
+| `-v` | Info | Informational messages |
+| `-vv` | Debug | Detailed debug output |
+| `-vvv` | Trace | Full trace output |
+
+```bash
+nono run -vvv --allow . -- command
+```
+
+#### `--config`, `-c`
+
+Specify a configuration file path.
+
+```bash
+nono run --config ./nono.toml -- command
+```
+
+<Note>
+  Configuration file support is planned for a future release.
+</Note>
+
+## `nono why` Options
+
+The `why` command checks why a path or network operation would be allowed or denied. It's designed for both human debugging and programmatic use by AI agents.
+
+### `--path`
+
+The filesystem path to check.
+
+```bash
+nono why --path ~/.ssh/id_rsa --op read
+nono why --path ./my-project --op write
+```
+
+### `--op`
+
+The operation to check: `read`, `write`, or `readwrite`. Defaults to `read` if not specified.
+
+```bash
+nono why --path ./src --op read
+nono why --path ./output --op write
+nono why --path ./data --op readwrite
+```
+
+### `--host`
+
+Network host to check (instead of `--path`).
+
+```bash
+nono why --host api.openai.com --port 443
+```
+
+### `--port`
+
+Network port (default: 443). Used with `--host`.
+
+```bash
+nono why --host example.com --port 8080
+```
+
+### `--json`
+
+Output JSON instead of human-readable format. Useful for programmatic use by AI agents.
+
+```bash
+nono why --json --path ~/.ssh --op read
+# {"status":"denied","reason":"sensitive_path","category":"SSH keys and config",...}
+```
+
+### `--self`
+
+Query current sandbox state from inside a sandboxed process. This allows agents to introspect their own capabilities.
+
+```bash
+# Inside a sandbox:
+nono why --self --path /tmp --op write --json
+```
+
+### Capability Context Options
+
+When checking paths outside a sandbox, you can simulate a capability context:
+
+```bash
+# Check if ./src would be writable with --allow .
+nono why --path ./src --op write --allow .
+
+# Check against a profile
+nono why --path ~/.config --op read --profile claude-code
+```
+
+Available context flags:
+- `--allow`, `-a` - Directories with read+write access
+- `--read`, `-r` - Directories with read-only access
+- `--write`, `-w` - Directories with write-only access
+- `--allow-file` - Single files with read+write access
+- `--read-file` - Single files with read-only access
+- `--write-file` - Single files with write-only access
+- `--net-block` - Block network access
+- `--profile`, `-p` - Use a named profile
+- `--workdir` - Working directory for `$WORKDIR` expansion
+- `--trust-unsigned` - Trust unsigned user profiles
+
+## `nono setup` Options
+
+### `--check-only`
+
+Only verify installation and sandbox support, don't create any files.
+
+```bash
+nono setup --check-only
+```
+
+### `--profiles`
+
+Generate example user profiles in `~/.config/nono/profiles/`.
+
+```bash
+nono setup --profiles
+```
+
+### `--shell-integration`
+
+Show shell integration instructions (aliases, etc.).
+
+```bash
+nono setup --shell-integration
+```
+
+### `--verbose`, `-v`
+
+Show detailed information during setup. Can be specified multiple times.
+
+```bash
+nono setup -v --profiles
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Command executed successfully |
+| 1 | nono error (invalid arguments, sandbox failure) |
+| * | Exit code from the executed command |
+
+## Path Resolution
+
+All paths are canonicalized before the sandbox is applied:
+
+- Relative paths are resolved to absolute paths
+- Symlinks are followed and resolved
+- Parent directory references (`..`) are resolved
+
+This prevents symlink escape attacks where a malicious agent creates a symlink pointing outside the allowed directory.
+
+```bash
+# These are equivalent if ./project resolves to /home/user/project
+nono run --allow ./project -- command
+nono run --allow /home/user/project -- command
+```
+
+## Combining Flags
+
+Flags can be combined freely:
+
+```bash
+nono run \
+  --allow ./project \
+  --read ~/.config/myapp \
+  --write ./logs \
+  --read-file ~/.gitconfig \
+  -vv \
+  -- my-agent --arg1 --arg2
+```
+
+## Examples
+
+See the [Examples](examples.md) page for common usage patterns.

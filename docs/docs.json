@@ -1,0 +1,96 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "nono",
+  "logo": {
+    "dark": "/assets/logo.png",
+    "light": "/assets/logo.png"
+  },
+  "favicon": "/assets/logo.png",
+  "colors": {
+    "primary": "#0D9373",
+    "light": "#07C983",
+    "dark": "#0D9373"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/lukehinds/nono"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Discord",
+      "href": "https://discord.gg/pPcjYzGvbS"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "getting_started/installation"
+            ]
+          },
+          {
+            "group": "Usage",
+            "pages": [
+              "usage/index",
+              "usage/secrets",
+              "usage/examples",
+              "usage/troubleshooting"
+            ]
+          },
+          {
+            "group": "Agents & Clients",
+            "pages": [
+              "clients/quickstart",
+              "clients/claude-code",
+              "clients/opencode",
+              "clients/openclaw"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/index",
+              "security/profiles",
+              "security/signing",
+              "security/vs-containers",
+              "security/landlock",
+              "security/seatbelt",
+              "security/vs-application"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "usage/flags"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/index",
+              "development/testing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/lukehinds/nono",
+      "discord": "https://discord.gg/pPcjYzGvbS"
+    }
+  }
+}

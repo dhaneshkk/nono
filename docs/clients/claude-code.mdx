@@ -1,0 +1,172 @@
+---
+title: Claude Code
+description: Sandboxing Anthropic Claude Code with nono
+---
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's CLI coding agent. It reads and writes files, runs commands, and interacts with git on your behalf. Running it under nono ensures it can only access what you explicitly allow.
+
+## Why Sandbox Claude Code?
+
+Claude Code operates includes its own sandbox mechanism, but the Agent is able to override the sandbox by calling `dangerouslyOverrideSandbox: true` and access any file and perform any operation on the system.
+
+![Claude Code using dangerouslyOverrideSandbox](/assets/claude-code-overrides-the-sandbox-without-permission.webp)
+
+This creates several risks:
+
+- It could read sensitive files outside your project (SSH keys, cloud credentials)
+- A prompt injection in a dependency could trigger unintended file access
+- Mistakes in file operations could affect directories outside your workspace
+
+nono's kernel-enforced sandbox makes these scenarios structurally impossible.
+
+## Quick Start
+
+```bash
+nono run --profile claude-code -- claude
+```
+
+The built-in profile provides:
+- **Read+write access** to the current working directory
+- **Read+write access** to `~/.claude` (agent state, debug logs, project config)
+- **Read+write access** to `~/.claude.json` (settings file)
+- **Network access** enabled (required for Anthropic API)
+- **Interactive mode** enabled (preserves TTY for Claude's terminal UI)
+- **Automatic hook installation** for sandbox-aware error handling
+
+## Custom Profile
+
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/claude-code.toml`:
+
+```toml
+[meta]
+name = "claude-code"
+version = "1.0.0"
+description = "Claude Code with additional project access"
+
+[filesystem]
+allow = ["$WORKDIR", "$HOME/.claude"]
+read = ["$HOME/shared-libs"]
+
+[filesystem.files]
+allow = ["$HOME/.claude.json"]
+read = ["$HOME/.gitconfig"]
+
+[network]
+block = false
+
+[secrets]
+anthropic_api_key = "ANTHROPIC_API_KEY"
+```
+
+**Usage (custom profiles require `--trust-unsigned`):**
+```bash
+nono run --profile claude-code --trust-unsigned --secrets -- claude
+```
+
+<Note>
+Custom profiles with the same name override the built-in. Remove or rename the file to revert to the built-in profile.
+</Note>
+
+## Security Tips
+
+### Use Secrets Management
+
+Instead of keeping your API key in environment variable exports or shell config files, load it from the system keystore:
+
+**macOS:**
+```bash
+security add-generic-password -s "nono" -a "anthropic_api_key" -w
+```
+
+**Linux:**
+```bash
+secret-tool store --label="nono: anthropic_api_key" service nono username anthropic_api_key
+```
+
+Then run with secrets:
+```bash
+nono run --profile claude-code --secrets anthropic_api_key -- claude
+```
+
+See [Secrets Management](/usage/secrets) for full documentation.
+
+### Restrict to Specific Projects
+
+The built-in profile grants access to the current working directory (wherever you run the command). To limit access to a specific directory regardless of where you invoke it:
+
+```bash
+nono run --allow ~/projects/my-app --read ~/.claude -- claude
+```
+
+### Read-Only Mode
+
+For code review or exploration where Claude shouldn't modify files:
+
+```bash
+nono run --read . --read ~/.claude --allow-file ~/.claude.json -- claude
+```
+
+### Block Network for Offline Work
+
+If you want to prevent any outbound connections (e.g., for reviewing local code without API calls):
+
+```bash
+nono run --profile claude-code --net-block -- claude
+```
+
+## Overriding Profile Settings
+
+CLI flags always take precedence over profile settings:
+
+```bash
+# Use profile but add extra directory access
+nono run --profile claude-code --allow ~/other-project -- claude
+
+# Use profile but block network
+nono run --profile claude-code --net-block -- claude
+```
+
+See [Security Profiles](/security/profiles) for details on profile format and precedence rules.
+
+## Automatic Hook Integration
+
+When you first run `nono run --profile claude-code`, nono automatically installs a hook that helps Claude understand sandbox restrictions. You'll see:
+
+```
+Installing claude-code hook to ~/.claude/hooks/nono-hook.sh
+```
+
+This hook:
+1. **Detects sandbox errors** - When Claude's file operations fail due to sandbox restrictions
+2. **Injects context** - Tells Claude exactly which paths are allowed and blocked
+3. **Provides guidance** - Instructs Claude to suggest restarting with `--allow` flags instead of attempting workarounds
+
+nono also adds a section to `~/.claude/CLAUDE.md` with upfront sandbox instructions, so Claude understands the security boundaries before encountering errors.
+
+<Note>
+The hook installation is idempotent - it only installs once and updates automatically when nono is upgraded. The hook only activates when running inside a nono sandbox (detected via `$NONO_CAP_FILE`).
+</Note>
+
+### What Claude Sees on Errors
+
+When Claude attempts to access a blocked path, instead of just seeing "Operation not permitted", the hook injects:
+
+```
+[NONO SANDBOX - PERMISSION DENIED]
+
+STOP. Do not try alternative approaches. This is a hard security boundary.
+
+You are running inside the nono security sandbox. The operation you just
+attempted is PERMANENTLY BLOCKED for this session.
+
+ALLOWED PATHS (everything else is blocked):
+  /Users/you/project (readwrite)
+  /Users/you/.claude (readwrite)
+Network: allowed
+
+REQUIRED ACTION:
+Tell the user they must EXIT this Claude session and restart with:
+  nono run --allow /path/to/needed -- claude
+```
+
+This prevents Claude from wasting time on workarounds that cannot succeed.

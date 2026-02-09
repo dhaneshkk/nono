@@ -1,0 +1,255 @@
+---
+title: nono vs Containers
+description: When to use nono, Docker, or both for sandboxing AI agents
+---
+
+nono and containers (Docker, Podman, etc.) provide different isolation models. This guide helps you choose the right tool for your use case.
+
+## Quick Comparison
+
+| Aspect | nono | Docker Container |
+|--------|------|------------------|
+| Startup time | ~0ms | ~100-500ms |
+| Setup required | None | Dockerfile, daemon |
+| Filesystem model | Path-level allow/deny | Separate filesystem |
+| Works on host files | Yes (directly) | Requires volume mounts |
+| Credential protection | Automatic blocklist | Manual (don't mount) |
+| Network isolation | On/off | Full namespace |
+| Resource limits | No | Yes (cgroups) |
+| Process isolation | No | Yes (PID namespace) |
+
+## When to Use nono
+
+**nono excels when you need:**
+
+### Zero-Latency Startup
+
+```bash
+# Instant startup - no container overhead
+nono run --allow . -- claude-code
+
+# Compare to Docker
+docker run -v $(pwd):/work -it my-agent  # 100-500ms+ overhead per invocation
+```
+
+### Direct Access to Your Working Directory
+
+AI coding agents need to read and modify your actual source files. With nono, this works naturally:
+
+```bash
+# Agent can edit files in current directory
+nono run --allow . -- aider
+```
+
+With Docker, you need will need to create volume mounts and set permission issues:
+
+```bash
+# Volume mounts can cause UID/GID mismatches
+docker run -v $(pwd):/work -u $(id -u):$(id -g) my-agent
+```
+
+### Automatic Credential Protection
+
+nono blocks sensitive paths by default, even if you allow a parent directory:
+
+```bash
+# Allows ~/projects but still blocks ~/.ssh, ~/.aws, etc.
+nono run --allow ~/projects -- agent
+```
+
+With Docker, you must be careful not to mount sensitive directories:
+
+```bash
+# Easy to accidentally expose secrets
+docker run -v $HOME:/home/user my-agent  # Dangerous!
+```
+
+### Zero Configuration
+
+nono requires no setup - just install and run:
+
+```bash
+brew install nono
+nono run --allow . -- my-agent
+```
+
+Docker requires:
+- Docker daemon running
+- Dockerfile for custom images
+- Understanding of volumes, networks, users
+- Image pulls and builds
+
+## When to Use Containers
+
+Containers are better when you need:
+
+### Full Environment Isolation
+
+If the agent needs specific system libraries, language runtimes, or tools:
+
+```dockerfile
+FROM python:3.11
+RUN pip install numpy pandas tensorflow
+```
+
+nono runs in your existing environment - it doesn't provide a separate runtime.
+
+### Resource Limits
+
+Containers can limit CPU, memory, and I/O:
+
+```bash
+docker run --memory=2g --cpus=1 my-agent
+```
+
+nono does not limit resources. A runaway agent can consume all available CPU/memory.
+
+### Process Isolation
+
+Containers have separate PID namespaces - processes inside can't see or signal host processes:
+
+```bash
+# Inside container, can only see container processes
+docker run my-agent ps aux  # Shows only container processes
+```
+
+nono shares the host PID namespace - the sandboxed process can see (but not necessarily interact with) other processes.
+
+### Reproducible Environments
+
+For CI/CD or sharing exact environments:
+
+```bash
+# Same environment everywhere
+docker run my-org/agent:v1.2.3 -- run-tests
+```
+
+## Using Both Together
+
+For maximum security, combine nono with containers:
+
+```dockerfile
+# Dockerfile
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y nono
+ENTRYPOINT ["nono", "run", "--allow", "/work"]
+```
+
+```bash
+# Defense in depth: container + nono
+docker run -v $(pwd):/work my-nono-agent -- claude-code
+```
+
+This gives you:
+- Container's namespace isolation
+- Container's resource limits
+- nono's path-level filesystem control
+- nono's automatic credential blocking
+
+## Threat Model Comparison
+
+### What nono Protects Against
+
+- Reading/writing files outside allowed paths
+- Accessing credentials (~/.ssh, ~/.aws, etc.)
+- Running blocked commands (rm, dd, etc.)
+- Network access (when blocked)
+
+### What Containers Protect Against
+
+- All of the above (but with a fair amount of configuration)
+- Process visibility and signaling
+- Resource exhaustion (with limits)
+- Environment contamination
+
+### What Neither Protects Against
+
+- Kernel vulnerabilities
+- Side-channel attacks
+- Prompt Injection (which no one can fully prevent)
+- Social engineering (agent convinces you to run dangerous command)
+
+## Performance Comparison
+
+### Startup Time
+
+```bash
+# nono: instant
+time nono run --allow . -- echo hello
+# real    0m0.005s
+
+# Docker (warm, image cached)
+time docker run alpine echo hello
+# real    0m0.350s
+
+# Docker (cold, needs pull)
+time docker run alpine echo hello
+# real    0m2.500s
+```
+
+### Memory Overhead
+
+- **nono**: ~0 MB (just applies sandbox and execs)
+- **Docker**: ~10-50 MB per container (runtime overhead)
+
+### Disk Usage
+
+- **nono**: ~2 MB binary
+- **Docker**: 100 MB+ per image (varies widely)
+
+## Migration Guide
+
+### From Docker to nono
+
+If you're currently using Docker just for sandboxing:
+
+```bash
+# Before: Docker
+docker run -v $(pwd):/work -w /work python:3.11 python script.py
+
+# After: nono (uses your installed Python)
+nono run --allow . -- python script.py
+```
+
+## Decision Flowchart
+
+```
+Do you need a different OS to the host?
+├── Yes → Use containers
+└── No
+    │
+    Do you need resource limits (CPU/memory)?
+    ├── Yes → Use containers (or both)
+    └── No
+        │
+        Do you need process isolation?
+        ├── Yes → Use containers (or both)
+        └── No
+            │
+            Is startup time critical?
+            ├── Yes → Use nono
+            └── No
+                │
+                Do you need path-level filesystem control?
+                ├── Yes → Use nono (or both)
+                └── No → Either works
+```
+
+## Summary
+
+| Use Case | Recommendation |
+|----------|----------------|
+| AI coding agents (Claude, Aider, etc.) | nono |
+| CI/CD pipelines | Containers |
+| Interactive development | nono |
+| Untrusted code execution | Both |
+| Reproducible environments | Containers |
+| Quick sandboxing, zero setup | nono |
+| Resource-limited execution | Containers |
+| Maximum security | Both |
+
+## Next Steps
+
+- [Security Model](index.mdx) - Understanding nono's guarantees
+- [Profiles](/security/profiles) - Pre-configured sandboxes for common agents
+- [Installation](/getting_started/installation) - Get started with nono
