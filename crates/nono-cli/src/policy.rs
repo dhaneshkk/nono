@@ -130,9 +130,22 @@ fn expand_path(path_str: &str) -> PathBuf {
     PathBuf::from(expanded)
 }
 
-/// Escape a path for Seatbelt profile strings
+/// Escape a path for Seatbelt profile strings.
+///
+/// Paths are placed inside double-quoted S-expression strings where `\` and `"`
+/// are the significant characters. Control characters are stripped since they
+/// cannot appear in valid filesystem paths and could disrupt profile parsing.
 fn escape_seatbelt_path(path: &str) -> String {
-    path.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut result = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' | '\r' | '\0' => {}
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 // ============================================================================
@@ -581,5 +594,14 @@ mod tests {
             "/path with\\\\slash"
         );
         assert_eq!(escape_seatbelt_path("/path\"quoted"), "/path\\\"quoted");
+        assert_eq!(
+            escape_seatbelt_path("/path\nwith\nnewlines"),
+            "/pathwithnewlines"
+        );
+        assert_eq!(
+            escape_seatbelt_path("/path\rwith\rreturns"),
+            "/pathwithreturns"
+        );
+        assert_eq!(escape_seatbelt_path("/path\0with\0nulls"), "/pathwithnulls");
     }
 }

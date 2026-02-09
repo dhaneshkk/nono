@@ -73,9 +73,22 @@ fn collect_parent_dirs(caps: &CapabilitySet) -> std::collections::HashSet<String
     parents
 }
 
-/// Escape a path for use in Seatbelt profile
+/// Escape a path for use in Seatbelt profile strings.
+///
+/// Paths are placed inside double-quoted S-expression strings where `\` and `"`
+/// are the significant characters. Control characters are stripped since they
+/// cannot appear in valid filesystem paths and could disrupt profile parsing.
 fn escape_path(path: &str) -> String {
-    path.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut result = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' | '\r' | '\0' => {}
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// Generate a Seatbelt profile from capabilities
@@ -121,8 +134,20 @@ fn generate_profile(caps: &CapabilitySet) -> String {
         ));
     }
 
-    // Allow mapping executables into memory (required for dyld)
-    profile.push_str("(allow file-map-executable)\n");
+    // Allow mapping executables into memory, restricted to readable paths.
+    // This prevents loading arbitrary shared libraries via DYLD_INSERT_LIBRARIES
+    // from paths outside the sandbox's read set.
+    for cap in caps.fs_capabilities() {
+        if matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite) {
+            let escaped_path = escape_path(&cap.resolved.display().to_string());
+            let path_filter = if cap.is_file {
+                format!("literal \"{}\"", escaped_path)
+            } else {
+                format!("subpath \"{}\"", escaped_path)
+            };
+            profile.push_str(&format!("(allow file-map-executable ({}))\n", path_filter));
+        }
+    }
 
     // Allow file ioctl for TTY
     profile.push_str("(allow file-ioctl)\n");
@@ -268,6 +293,7 @@ mod tests {
 
         assert!(profile.contains("(allow file-read* (subpath \"/test\"))"));
         assert!(profile.contains("(allow file-write* (subpath \"/test\"))"));
+        assert!(profile.contains("(allow file-map-executable (subpath \"/test\"))"));
     }
 
     #[test]
@@ -285,6 +311,17 @@ mod tests {
 
         assert!(profile.contains("file-write*"));
         assert!(profile.contains("literal \"/test.txt\""));
+        // Write-only paths must NOT get file-map-executable
+        assert!(!profile.contains("file-map-executable"));
+    }
+
+    #[test]
+    fn test_generate_profile_no_global_file_map_executable() {
+        let caps = CapabilitySet::default();
+        let profile = generate_profile(&caps);
+
+        // Must not contain a global (unrestricted) file-map-executable
+        assert!(!profile.contains("(allow file-map-executable)\n"));
     }
 
     #[test]
@@ -327,6 +364,9 @@ mod tests {
         assert_eq!(escape_path("/simple/path"), "/simple/path");
         assert_eq!(escape_path("/path with\\slash"), "/path with\\\\slash");
         assert_eq!(escape_path("/path\"quoted"), "/path\\\"quoted");
+        assert_eq!(escape_path("/path\nwith\nnewlines"), "/pathwithnewlines");
+        assert_eq!(escape_path("/path\rwith\rreturns"), "/pathwithreturns");
+        assert_eq!(escape_path("/path\0with\0nulls"), "/pathwithnulls");
     }
 
     #[test]

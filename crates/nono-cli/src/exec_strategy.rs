@@ -46,6 +46,28 @@ pub fn resolve_program(program: &str) -> Result<PathBuf> {
 /// Main thread (1) + up to 3 keyring threads for D-Bus/Security.framework.
 const MAX_KEYRING_THREADS: usize = 4;
 
+/// Returns true if an environment variable is unsafe to inherit into a sandboxed child.
+///
+/// Covers linker injection (LD_PRELOAD, DYLD_INSERT_LIBRARIES), shell startup
+/// injection (BASH_ENV, PROMPT_COMMAND), and interpreter code injection
+/// (NODE_OPTIONS, PERL5OPT, RUBYOPT, PYTHONSTARTUP).
+fn is_dangerous_env_var(key: &str) -> bool {
+    key.starts_with("LD_")
+        || key.starts_with("DYLD_")
+        || key == "BASH_ENV"
+        || key == "ENV"
+        || key == "CDPATH"
+        || key == "GLOBIGNORE"
+        || key.starts_with("BASH_FUNC_")
+        || key == "PROMPT_COMMAND"
+        || key == "PYTHONSTARTUP"
+        || key == "NODE_OPTIONS"
+        || key == "PERL5OPT"
+        || key == "PERL5LIB"
+        || key == "RUBYOPT"
+        || key == "RUBYLIB"
+}
+
 /// Threading context for fork safety validation.
 ///
 /// After loading secrets from the system keystore, the keyring crate may leave
@@ -136,6 +158,14 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
     );
 
     let mut cmd = Command::new(config.resolved_program);
+    cmd.env_clear();
+
+    for (key, value) in std::env::vars() {
+        if !is_dangerous_env_var(&key) {
+            cmd.env(&key, &value);
+        }
+    }
+
     cmd.args(cmd_args).env("NONO_CAP_FILE", config.cap_file);
 
     for (key, value) in &config.env_vars {
@@ -226,11 +256,12 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
     // Build environment: inherit current env + add our vars
     let mut env_c: Vec<CString> = Vec::new();
 
-    // Copy current environment, skipping vars we'll override
+    // Copy current environment, filtering dangerous and overridden vars
     for (key, value) in std::env::vars_os() {
         if let (Some(k), Some(v)) = (key.to_str(), value.to_str()) {
-            let should_skip =
-                config.env_vars.iter().any(|(ek, _)| *ek == k) || k == "NONO_CAP_FILE";
+            let should_skip = config.env_vars.iter().any(|(ek, _)| *ek == k)
+                || k == "NONO_CAP_FILE"
+                || is_dangerous_env_var(k);
             if !should_skip {
                 if let Ok(cstr) = CString::new(format!("{}={}", k, v)) {
                     env_c.push(cstr);
@@ -764,5 +795,51 @@ mod tests {
         assert_ne!(ExecStrategy::Direct, ExecStrategy::Monitor);
         assert_ne!(ExecStrategy::Monitor, ExecStrategy::Supervised);
         assert_ne!(ExecStrategy::Direct, ExecStrategy::Supervised);
+    }
+
+    #[test]
+    fn test_dangerous_env_vars_linker_injection() {
+        assert!(is_dangerous_env_var("LD_PRELOAD"));
+        assert!(is_dangerous_env_var("LD_LIBRARY_PATH"));
+        assert!(is_dangerous_env_var("LD_AUDIT"));
+        assert!(is_dangerous_env_var("DYLD_INSERT_LIBRARIES"));
+        assert!(is_dangerous_env_var("DYLD_LIBRARY_PATH"));
+        assert!(is_dangerous_env_var("DYLD_FRAMEWORK_PATH"));
+    }
+
+    #[test]
+    fn test_dangerous_env_vars_shell_injection() {
+        assert!(is_dangerous_env_var("BASH_ENV"));
+        assert!(is_dangerous_env_var("ENV"));
+        assert!(is_dangerous_env_var("CDPATH"));
+        assert!(is_dangerous_env_var("GLOBIGNORE"));
+        assert!(is_dangerous_env_var("BASH_FUNC_foo%%"));
+        assert!(is_dangerous_env_var("PROMPT_COMMAND"));
+    }
+
+    #[test]
+    fn test_dangerous_env_vars_interpreter_injection() {
+        assert!(is_dangerous_env_var("PYTHONSTARTUP"));
+        assert!(is_dangerous_env_var("NODE_OPTIONS"));
+        assert!(is_dangerous_env_var("PERL5OPT"));
+        assert!(is_dangerous_env_var("PERL5LIB"));
+        assert!(is_dangerous_env_var("RUBYOPT"));
+        assert!(is_dangerous_env_var("RUBYLIB"));
+    }
+
+    #[test]
+    fn test_safe_env_vars_allowed() {
+        assert!(!is_dangerous_env_var("HOME"));
+        assert!(!is_dangerous_env_var("PATH"));
+        assert!(!is_dangerous_env_var("SHELL"));
+        assert!(!is_dangerous_env_var("TERM"));
+        assert!(!is_dangerous_env_var("LANG"));
+        assert!(!is_dangerous_env_var("USER"));
+        assert!(!is_dangerous_env_var("TMPDIR"));
+        assert!(!is_dangerous_env_var("EDITOR"));
+        assert!(!is_dangerous_env_var("XDG_CONFIG_HOME"));
+        assert!(!is_dangerous_env_var("CARGO_HOME"));
+        assert!(!is_dangerous_env_var("RUST_LOG"));
+        assert!(!is_dangerous_env_var("SSH_AUTH_SOCK"));
     }
 }
