@@ -617,14 +617,16 @@ mod tests {
 
     #[test]
     fn test_sensitive_paths_defined() {
-        let paths = config::get_sensitive_paths().expect("security lists must load");
-        assert!(paths.iter().any(|p| p.contains("ssh")));
-        assert!(paths.iter().any(|p| p.contains("aws")));
+        let loaded_policy = policy::load_embedded_policy().expect("policy must load");
+        let paths = policy::get_sensitive_paths(&loaded_policy).expect("must resolve");
+        assert!(paths.iter().any(|(p, _)| p.contains("ssh")));
+        assert!(paths.iter().any(|(p, _)| p.contains("aws")));
     }
 
     #[test]
     fn test_dangerous_commands_defined() {
-        let commands = config::get_dangerous_commands().expect("security lists must load");
+        let loaded_policy = policy::load_embedded_policy().expect("policy must load");
+        let commands = policy::get_dangerous_commands(&loaded_policy);
         assert!(commands.contains("rm"));
         assert!(commands.contains("dd"));
         assert!(commands.contains("chmod"));
@@ -633,36 +635,36 @@ mod tests {
     #[test]
     fn test_check_blocked_command_basic() {
         assert!(config::check_blocked_command("rm", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_blocked_command("dd", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_blocked_command("chmod", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
 
         assert!(config::check_blocked_command("echo", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
         assert!(config::check_blocked_command("ls", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
         assert!(config::check_blocked_command("cat", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
     }
 
     #[test]
     fn test_check_blocked_command_with_path() {
         assert!(config::check_blocked_command("/bin/rm", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_blocked_command("/usr/bin/dd", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_blocked_command("./rm", &[], &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
     }
 
@@ -670,10 +672,10 @@ mod tests {
     fn test_check_blocked_command_allow_override() {
         let allowed = vec!["rm".to_string()];
         assert!(config::check_blocked_command("rm", &allowed, &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
         assert!(config::check_blocked_command("dd", &allowed, &[])
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
     }
 
@@ -682,31 +684,31 @@ mod tests {
         let extra = vec!["custom-dangerous".to_string()];
         assert!(
             config::check_blocked_command("custom-dangerous", &[], &extra)
-                .expect("security lists must load")
+                .expect("policy must load")
                 .is_some()
         );
         assert!(config::check_blocked_command("rm", &[], &extra)
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
     }
 
     #[test]
     fn test_check_sensitive_path() {
         assert!(config::check_sensitive_path("~/.ssh")
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_sensitive_path("~/.aws")
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
         assert!(config::check_sensitive_path("~/.bashrc")
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_some());
 
         assert!(config::check_sensitive_path("/tmp")
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
         assert!(config::check_sensitive_path("~/Documents")
-            .expect("security lists must load")
+            .expect("policy must load")
             .is_none());
     }
 }

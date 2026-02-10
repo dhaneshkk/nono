@@ -8,3 +8,8 @@
 
 # misc
 proj/
+
+
+# Library tests
+bindings/python/.venv*
+bindings/node/node_modules*

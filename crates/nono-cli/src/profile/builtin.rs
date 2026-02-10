@@ -58,7 +58,8 @@ fn claude_code() -> Profile {
             write: vec![],
             // ~/.claude.json: agent writes settings/state here
             allow_file: vec!["$HOME/.claude.json".to_string()],
-            read_file: vec![],
+            // macOS Keychain: OAuth token read for authentication
+            read_file: vec!["$HOME/Library/Keychains/login.keychain-db".to_string()],
             write_file: vec![],
         },
         network: NetworkConfig { block: false },
@@ -142,34 +143,8 @@ fn opencode() -> Profile {
     }
 }
 
-/// Common deny + system groups shared by all profiles
-fn base_groups() -> Vec<String> {
-    vec![
-        "deny_credentials",
-        "deny_keychains_macos",
-        "deny_keychains_linux",
-        "deny_browser_data_macos",
-        "deny_browser_data_linux",
-        "deny_macos_private",
-        "deny_shell_history",
-        "deny_shell_configs",
-        "system_read_macos",
-        "system_read_linux",
-        "system_write_macos",
-        "system_write_linux",
-        "user_tools",
-        "homebrew",
-        "dangerous_commands",
-        "dangerous_commands_macos",
-        "dangerous_commands_linux",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
-}
-
 fn claude_code_groups() -> Vec<String> {
-    let mut groups = base_groups();
+    let mut groups = crate::policy::base_groups();
     groups.extend(
         [
             "user_caches_macos",
@@ -184,13 +159,13 @@ fn claude_code_groups() -> Vec<String> {
 }
 
 fn openclaw_groups() -> Vec<String> {
-    let mut groups = base_groups();
+    let mut groups = crate::policy::base_groups();
     groups.push("node_runtime".to_string());
     groups
 }
 
 fn opencode_groups() -> Vec<String> {
-    let mut groups = base_groups();
+    let mut groups = crate::policy::base_groups();
     groups.extend(
         ["user_caches_macos", "node_runtime", "unlink_protection"]
             .iter()

@@ -448,8 +448,9 @@ fn process_accesses(
 ) -> Result<LearnResult> {
     let mut result = LearnResult::new();
 
-    // Get system paths that are already allowed
-    let system_read_paths = config::get_system_read_paths()?;
+    // Get system paths that are already allowed (from policy.json groups)
+    let loaded_policy = crate::policy::load_embedded_policy()?;
+    let system_read_paths = crate::policy::get_system_read_paths(&loaded_policy);
     let system_read_set: HashSet<&str> = system_read_paths.iter().map(|s| s.as_str()).collect();
 
     // Get profile paths if available

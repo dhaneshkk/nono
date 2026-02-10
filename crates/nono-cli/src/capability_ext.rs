@@ -4,10 +4,9 @@
 //! or profiles. These are CLI-specific and not part of the core library.
 
 use crate::cli::SandboxArgs;
-use crate::config;
 use crate::policy;
 use crate::profile::{expand_vars, Profile};
-use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
+use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result};
 use std::path::Path;
 use tracing::{debug, warn};
 
@@ -50,6 +49,11 @@ pub trait CapabilitySetExt {
 impl CapabilitySetExt for CapabilitySet {
     fn from_args(args: &SandboxArgs) -> Result<CapabilitySet> {
         let mut caps = CapabilitySet::new();
+
+        // Resolve base policy groups (system paths, deny rules, dangerous commands)
+        let loaded_policy = policy::load_embedded_policy()?;
+        let base = policy::base_groups();
+        let resolved = policy::resolve_groups(&loaded_policy, &base, &mut caps)?;
 
         // Directory permissions (canonicalize handles existence check atomically)
         for path in &args.allow {
@@ -108,8 +112,13 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_blocked_command(cmd.clone());
         }
 
-        // Add system read paths from config (required for executables to run)
-        add_system_read_paths(&mut caps)?;
+        // Apply deferred unlink overrides if any deny groups requested them
+        if resolved.needs_unlink_overrides {
+            policy::apply_unlink_overrides(&mut caps);
+        }
+
+        // Deduplicate capabilities
+        caps.deduplicate();
 
         Ok(caps)
     }
@@ -120,19 +129,18 @@ impl CapabilitySetExt for CapabilitySet {
         args: &SandboxArgs,
     ) -> Result<CapabilitySet> {
         let mut caps = CapabilitySet::new();
-        let has_groups = !profile.security.groups.is_empty();
 
-        // Resolve policy groups if the profile references them
-        let mut needs_unlink_overrides = false;
-        if has_groups {
-            let policy_json = config::embedded::embedded_policy_json();
-            let loaded_policy = policy::load_policy(policy_json)?;
-
-            let resolved =
-                policy::resolve_groups(&loaded_policy, &profile.security.groups, &mut caps)?;
-            needs_unlink_overrides = resolved.needs_unlink_overrides;
-            debug!("Resolved {} policy groups", resolved.names.len());
-        }
+        // Resolve policy groups from profile
+        // All profiles must have groups; if empty, use base_groups() as fallback
+        let loaded_policy = policy::load_embedded_policy()?;
+        let groups = if profile.security.groups.is_empty() {
+            policy::base_groups()
+        } else {
+            profile.security.groups.clone()
+        };
+        let resolved = policy::resolve_groups(&loaded_policy, &groups, &mut caps)?;
+        let needs_unlink_overrides = resolved.needs_unlink_overrides;
+        debug!("Resolved {} policy groups", resolved.names.len());
 
         // Process profile filesystem config (profile-specific paths on top of groups)
         let fs = &profile.filesystem;
@@ -198,12 +206,6 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
-
-        // Only add legacy system paths if NO groups were specified.
-        // Groups handle system paths via system_read_macos, system_write_macos, etc.
-        if !has_groups {
-            add_system_read_paths(&mut caps)?;
-        }
 
         // Apply deferred unlink overrides now that ALL writable paths are in place
         // (groups + profile [filesystem] + CLI overrides + CWD).
@@ -279,82 +281,6 @@ fn add_cli_overrides(caps: &mut CapabilitySet, args: &SandboxArgs) -> Result<()>
 
     for cmd in &args.block_command {
         caps.add_blocked_command(cmd.clone());
-    }
-
-    Ok(())
-}
-
-/// Expand `~` prefix to the user's validated home directory.
-fn expand_tilde(path_str: &str) -> Result<std::path::PathBuf> {
-    if let Some(rest) = path_str.strip_prefix("~/") {
-        let home = config::validated_home()?;
-        return Ok(std::path::PathBuf::from(home).join(rest));
-    } else if path_str == "~" {
-        let home = config::validated_home()?;
-        return Ok(std::path::PathBuf::from(home));
-    }
-    Ok(std::path::PathBuf::from(path_str))
-}
-
-/// Add system read paths from security config
-///
-/// These are paths required for executables to run (e.g., /usr, /bin, /lib).
-/// On macOS, also adds writable system paths (e.g., /tmp, /private/var/folders)
-/// needed for programs to create temp files.
-/// The library is a pure sandbox primitive - all policy lives in CLI.
-fn add_system_read_paths(caps: &mut CapabilitySet) -> Result<()> {
-    let system_paths = config::get_system_read_paths()?;
-
-    for path_str in system_paths {
-        let path = expand_tilde(&path_str)?;
-        if !caps.path_covered(&path) {
-            match FsCapability::new_dir(&path, AccessMode::Read) {
-                Ok(mut cap) => {
-                    cap.source = CapabilitySource::System;
-                    caps.add_fs(cap);
-                }
-                Err(e) => {
-                    // Non-fatal: path may not exist or may not be a directory
-                    tracing::debug!("Could not add system path {}: {}", path_str, e);
-                }
-            }
-        }
-    }
-
-    // Add macOS writable system paths (e.g., /tmp, /dev, /private/var/folders)
-    // These need write access for programs to create temp files, write to /dev/null, etc.
-    // NOTE: Do NOT use path_covered() here - a parent path having Read access
-    // does not mean we can skip adding Write access for a child path.
-    #[cfg(target_os = "macos")]
-    {
-        let writable_paths = config::get_system_writable_paths()?;
-        for path_str in writable_paths {
-            let path = expand_tilde(&path_str)?;
-            match FsCapability::new_dir(&path, AccessMode::ReadWrite) {
-                Ok(mut cap) => {
-                    cap.source = CapabilitySource::System;
-                    caps.add_fs(cap);
-                }
-                Err(e) => {
-                    tracing::debug!("Could not add writable system path {}: {}", path_str, e);
-                }
-            }
-        }
-
-        // Add $TMPDIR explicitly (dynamic path, usually under /private/var/folders)
-        let tmpdir = config::validated_tmpdir()?;
-        {
-            let path = std::path::PathBuf::from(&tmpdir);
-            match FsCapability::new_dir(&path, AccessMode::ReadWrite) {
-                Ok(mut cap) => {
-                    cap.source = CapabilitySource::System;
-                    caps.add_fs(cap);
-                }
-                Err(e) => {
-                    tracing::debug!("Could not add TMPDIR {}: {}", tmpdir, e);
-                }
-            }
-        }
     }
 
     Ok(())

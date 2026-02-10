@@ -1,5 +1,4 @@
 use crate::cli::SetupArgs;
-use crate::config;
 use crate::profile;
 use nono::{NonoError, Result};
 use std::fs;
@@ -272,9 +271,10 @@ impl SetupRunner {
     fn show_protection_summary(&self) -> Result<()> {
         println!("[3/{}] Default protections...", self.total_phases());
 
-        // Get sensitive paths from config
-        let sensitive_paths = config::get_sensitive_paths()?;
-        let dangerous_commands = config::get_dangerous_commands()?;
+        // Get sensitive paths and dangerous commands from policy
+        let loaded_policy = crate::policy::load_embedded_policy()?;
+        let sensitive_paths = crate::policy::get_sensitive_paths(&loaded_policy)?;
+        let dangerous_commands = crate::policy::get_dangerous_commands(&loaded_policy);
 
         println!(
             "  * {} sensitive paths blocked by default:",

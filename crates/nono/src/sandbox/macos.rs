@@ -50,27 +50,67 @@ fn collect_parent_dirs(caps: &CapabilitySet) -> std::collections::HashSet<String
     let mut parents = std::collections::HashSet::new();
 
     for cap in caps.fs_capabilities() {
-        let path = cap.resolved.as_path();
-        let mut current = path.parent();
+        // Collect parents for both resolved and original paths.
+        // On macOS, /tmp is a symlink to /private/tmp. If the user passes
+        // --allow /tmp, we need metadata access to / for the symlink itself.
+        // The original path's parents handle this.
+        let paths_to_walk: Vec<&std::path::Path> = if cap.original != cap.resolved {
+            vec![cap.resolved.as_path(), cap.original.as_path()]
+        } else {
+            vec![cap.resolved.as_path()]
+        };
 
-        // Walk up the directory tree, collecting each parent
-        while let Some(parent) = current {
-            let parent_str = parent.to_string_lossy().to_string();
+        for path in paths_to_walk {
+            let mut current = path.parent();
+            while let Some(parent) = current {
+                let parent_str = parent.to_string_lossy().to_string();
 
-            // Stop at root
-            if parent_str == "/" || parent_str.is_empty() {
-                break;
+                // Stop at root
+                if parent_str == "/" || parent_str.is_empty() {
+                    break;
+                }
+
+                // If already present, ancestors were processed too - early exit
+                if !parents.insert(parent_str) {
+                    break;
+                }
+                current = parent.parent();
             }
-
-            // If already present, ancestors were processed too - early exit
-            if !parents.insert(parent_str) {
-                break;
-            }
-            current = parent.parent();
         }
     }
 
     parents
+}
+
+/// Build Seatbelt path filters for a capability.
+///
+/// On macOS, symlinks like `/tmp` -> `/private/tmp` mean the user's original
+/// path may differ from the canonicalized resolved path. Seatbelt operates on
+/// literal paths, not resolved symlinks, so we must emit rules for both.
+/// Returns one or two `(subpath "...")` or `(literal "...")` strings.
+fn path_filters_for_cap(cap: &crate::capability::FsCapability) -> Result<Vec<String>> {
+    let mut filters = Vec::with_capacity(2);
+
+    let resolved_str = cap.resolved.to_str().ok_or_else(|| {
+        NonoError::SandboxInit(format!(
+            "path contains non-UTF-8 bytes: {}",
+            cap.resolved.display()
+        ))
+    })?;
+    let escaped_resolved = escape_path(resolved_str);
+    let kind = if cap.is_file { "literal" } else { "subpath" };
+    filters.push(format!("{} \"{}\"", kind, escaped_resolved));
+
+    // If the original path differs (e.g. /tmp vs /private/tmp), emit a rule
+    // for the original too so Seatbelt allows traversing the symlink.
+    if cap.original != cap.resolved {
+        if let Some(original_str) = cap.original.to_str() {
+            let escaped_original = escape_path(original_str);
+            filters.push(format!("{} \"{}\"", kind, escaped_original));
+        }
+    }
+
+    Ok(filters)
 }
 
 /// Escape a path for use in Seatbelt profile strings.
@@ -153,18 +193,9 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // from paths outside the sandbox's read set.
     for cap in caps.fs_capabilities() {
         if matches!(cap.access, AccessMode::Read | AccessMode::ReadWrite) {
-            let escaped_path = escape_path(cap.resolved.to_str().ok_or_else(|| {
-                NonoError::SandboxInit(format!(
-                    "path contains non-UTF-8 bytes: {}",
-                    cap.resolved.display()
-                ))
-            })?);
-            let path_filter = if cap.is_file {
-                format!("literal \"{}\"", escaped_path)
-            } else {
-                format!("subpath \"{}\"", escaped_path)
-            };
-            profile.push_str(&format!("(allow file-map-executable ({}))\n", path_filter));
+            for filter in path_filters_for_cap(cap)? {
+                profile.push_str(&format!("(allow file-map-executable ({}))\n", filter));
+            }
         }
     }
 
@@ -174,38 +205,23 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     profile.push_str("(allow file-ioctl (regex #\"^/dev/pty[a-z][0-9a-f]+$\"))\n");
     // Also allow ioctl on explicitly granted paths (for interactive programs)
     for cap in caps.fs_capabilities() {
-        if let Some(path_str) = cap.resolved.to_str() {
-            let escaped_path = escape_path(path_str);
-            let path_filter = if cap.is_file {
-                format!("literal \"{}\"", escaped_path)
-            } else {
-                format!("subpath \"{}\"", escaped_path)
-            };
-            profile.push_str(&format!("(allow file-ioctl ({}))\n", path_filter));
+        for filter in path_filters_for_cap(cap)? {
+            profile.push_str(&format!("(allow file-ioctl ({}))\n", filter));
         }
     }
 
     // Allow pseudo-terminal operations
     profile.push_str("(allow pseudo-tty)\n");
 
-    // Add read rules for all capabilities with Read or ReadWrite access
+    // Add read rules for all capabilities with Read or ReadWrite access.
+    // Emits rules for both original and resolved paths when they differ
+    // (e.g. /tmp vs /private/tmp) so Seatbelt allows traversing symlinks.
     for cap in caps.fs_capabilities() {
-        let escaped_path = escape_path(cap.resolved.to_str().ok_or_else(|| {
-            NonoError::SandboxInit(format!(
-                "path contains non-UTF-8 bytes: {}",
-                cap.resolved.display()
-            ))
-        })?);
-
-        let path_filter = if cap.is_file {
-            format!("literal \"{}\"", escaped_path)
-        } else {
-            format!("subpath \"{}\"", escaped_path)
-        };
-
         match cap.access {
             AccessMode::Read | AccessMode::ReadWrite => {
-                profile.push_str(&format!("(allow file-read* ({}))\n", path_filter));
+                for filter in path_filters_for_cap(cap)? {
+                    profile.push_str(&format!("(allow file-read* ({}))\n", filter));
+                }
             }
             AccessMode::Write => {
                 // Write-only doesn't need read access
@@ -224,26 +240,16 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         profile.push('\n');
     }
 
-    // Add write rules for all capabilities with Write or ReadWrite access
+    // Add write rules for all capabilities with Write or ReadWrite access.
     // These come AFTER platform deny rules so user-granted write paths can
-    // override global denials like (deny file-write-unlink)
+    // override global denials like (deny file-write-unlink).
+    // Emits rules for both original and resolved paths when they differ.
     for cap in caps.fs_capabilities() {
-        let escaped_path = escape_path(cap.resolved.to_str().ok_or_else(|| {
-            NonoError::SandboxInit(format!(
-                "path contains non-UTF-8 bytes: {}",
-                cap.resolved.display()
-            ))
-        })?);
-
-        let path_filter = if cap.is_file {
-            format!("literal \"{}\"", escaped_path)
-        } else {
-            format!("subpath \"{}\"", escaped_path)
-        };
-
         match cap.access {
             AccessMode::Write | AccessMode::ReadWrite => {
-                profile.push_str(&format!("(allow file-write* ({}))\n", path_filter));
+                for filter in path_filters_for_cap(cap)? {
+                    profile.push_str(&format!("(allow file-write* ({}))\n", filter));
+                }
             }
             AccessMode::Read => {
                 // Read-only doesn't need write access

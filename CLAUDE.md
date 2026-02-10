@@ -100,12 +100,14 @@ make fmt             # Auto-format
 
 - **Error Handling**: Use `NonoError` for all errors; propagation via `?` only.
 - **Unwrap Policy**: Strictly forbid `.unwrap()` and `.expect()`; enforced by `clippy::unwrap_used`.
+- **Libraries should almost never panic**: Panics are for unrecoverable bugs, not expected error conditions. Use `Result` instead.
 - **Unsafe Code**: Restrict to FFI; must be wrapped in safe APIs with `// SAFETY:` docs.
 - **Path Security**: Validate and canonicalize all paths before applying capabilities.
 - **Arithmetic**: Use `checked_`, `saturating_`, or `overflowing_` methods for security-critical math.
 - **Memory**: Use the `zeroize` crate for sensitive data (keys/passwords) in memory.
 - **Testing**: Write unit tests for all new capability types and sandbox logic.
 - **Attributes**: Apply `#[must_use]` to functions returning critical Results.
+- **Lazy use of dead code**: Avoid `#[allow(dead_code)]`. If code is unused, either remove it or write tests that use it.
 
 ## Key Design Decisions
 
@@ -155,6 +157,8 @@ make fmt             # Auto-format
 2. **Silent fallbacks**: `unwrap_or_default()` on security config returns empty permissions = no protection.
 3. **Trusting resolved paths**: Symlinks can change between resolution and use.
 4. **Platform differences**: macOS `/etc` is a symlink to `/private/etc`. Both must be considered.
+5. **Overly broad permissions**: Granting `/tmp` read/write when only `/tmp/specific-file` is needed.
+6. **Solving for one architecture**: Linux and macOS have different capabilities and threat models. Design must account for both. Develop abstractions that can be implemented securely on both platforms. Test on both platforms regularly to catch divergences.
 
 ## References
 

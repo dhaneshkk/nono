@@ -1,19 +1,17 @@
 //! Configuration module for nono CLI
 //!
 //! This module handles loading and merging configuration from multiple sources:
-//! - Embedded author-signed security lists (highest trust)
-//! - System-level config at /etc/nono/ (admin-signed, additive only)
+//! - Embedded policy.json (composable security groups, single source of truth)
 //! - User-level config at ~/.config/nono/ (overrides with acknowledgment)
 //! - CLI flags (highest precedence)
 
 pub mod embedded;
-pub mod security_lists;
 pub mod user;
 pub mod verify;
 pub mod version;
 
+use crate::policy;
 use nono::{NonoError, Result};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -60,181 +58,6 @@ pub fn validated_tmpdir() -> Result<String> {
     }
 }
 
-// ============================================================================
-// Override system (implemented, not yet integrated)
-// These types and functions are used for the full override system which
-// will be integrated in a future PR. For now, allow dead_code.
-// ============================================================================
-
-/// Effective configuration after merging all sources
-#[allow(dead_code)]
-#[derive(Debug, Default)]
-pub struct EffectiveConfig {
-    /// All sensitive paths that should be blocked
-    pub sensitive_paths: HashSet<String>,
-
-    /// Sensitive paths that have been explicitly allowed (with reason)
-    pub allowed_sensitive: HashMap<String, OverrideInfo>,
-
-    /// All dangerous commands that should be blocked
-    pub dangerous_commands: HashSet<String>,
-
-    /// Commands that have been explicitly allowed (with reason)
-    pub allowed_commands: HashMap<String, OverrideInfo>,
-
-    /// System read paths for the current platform
-    pub system_read_paths: Vec<String>,
-
-    /// Version information for downgrade protection
-    pub security_lists_version: u64,
-}
-
-/// Information about an override (for audit trail)
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct OverrideInfo {
-    /// Reason provided by user for the override
-    pub reason: String,
-    /// When the override was acknowledged (if from config file)
-    pub acknowledged: Option<String>,
-    /// Source of the override
-    pub source: OverrideSource,
-    /// Access level for path overrides (read, write, or both)
-    pub access: Option<String>,
-}
-
-/// Source of an override for audit purposes
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum OverrideSource {
-    /// Override came from CLI flag (single session)
-    CliFlag,
-    /// Override came from user config file (persistent)
-    UserConfig,
-}
-
-impl OverrideInfo {
-    /// Create an override from a CLI flag
-    #[allow(dead_code)]
-    pub fn from_cli(reason: &str) -> Self {
-        Self {
-            reason: reason.to_string(),
-            acknowledged: None,
-            source: OverrideSource::CliFlag,
-            access: None,
-        }
-    }
-}
-
-/// Load effective configuration by merging all sources
-///
-/// Precedence (highest to lowest):
-/// 1. CLI flags
-/// 2. User config (~/.config/nono/config.toml)
-/// 3. System config (/etc/nono/) - additive only
-/// 4. Embedded defaults
-#[allow(dead_code)]
-pub fn load_effective_config() -> Result<EffectiveConfig> {
-    // Start with embedded security lists
-    let security_lists = embedded::load_security_lists()?;
-
-    let mut config = EffectiveConfig {
-        sensitive_paths: security_lists.all_sensitive_paths(),
-        dangerous_commands: security_lists.all_dangerous_commands(),
-        system_read_paths: security_lists.system_paths_for_platform(),
-        security_lists_version: security_lists.meta.version,
-        ..Default::default()
-    };
-
-    // Load user config if it exists (optional)
-    if let Some(user_config) = user::load_user_config()? {
-        // Apply user extensions (additions to blocklists)
-        for path in user_config.extensions.sensitive_paths.values().flatten() {
-            config.sensitive_paths.insert(path.clone());
-        }
-
-        for cmd in user_config.extensions.dangerous_commands.values().flatten() {
-            config.dangerous_commands.insert(cmd.clone());
-        }
-
-        // Apply user overrides (acknowledged exceptions)
-        for (path, override_info) in user_config.overrides.sensitive_paths {
-            if override_info.acknowledged.is_some() {
-                config.allowed_sensitive.insert(
-                    path,
-                    OverrideInfo {
-                        reason: override_info.reason,
-                        acknowledged: override_info.acknowledged,
-                        source: OverrideSource::UserConfig,
-                        access: override_info.access,
-                    },
-                );
-            }
-        }
-
-        for (cmd, override_info) in user_config.overrides.commands {
-            if override_info.acknowledged.is_some() {
-                config.allowed_commands.insert(
-                    cmd,
-                    OverrideInfo {
-                        reason: override_info.reason,
-                        acknowledged: override_info.acknowledged,
-                        source: OverrideSource::UserConfig,
-                        access: None,
-                    },
-                );
-            }
-        }
-    }
-
-    Ok(config)
-}
-
-/// Check if a path is in the sensitive paths list
-///
-/// Uses `Path::starts_with()` for component-wise comparison, preventing
-/// bypass attacks like `/homeevil` matching `/home`.
-#[allow(dead_code)]
-pub fn is_sensitive_path(path: &str, config: &EffectiveConfig) -> Result<bool> {
-    let home = validated_home()?;
-    let expanded = path.replace('~', &home);
-    let expanded_path = Path::new(&expanded);
-
-    for sensitive in &config.sensitive_paths {
-        let expanded_sensitive = sensitive.replace('~', &home);
-        let sensitive_path = Path::new(&expanded_sensitive);
-
-        if expanded_path == sensitive_path || expanded_path.starts_with(sensitive_path) {
-            // Check if explicitly allowed
-            if config.allowed_sensitive.contains_key(sensitive) {
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Check if a command is in the dangerous commands list
-#[allow(dead_code)]
-pub fn is_dangerous_command(cmd: &str, config: &EffectiveConfig) -> bool {
-    use std::ffi::OsStr;
-    use std::path::Path;
-
-    // Extract just the binary name (handle paths like /bin/rm)
-    let binary_os = Path::new(cmd)
-        .file_name()
-        .unwrap_or_else(|| OsStr::new(cmd));
-    let binary = binary_os.to_string_lossy();
-
-    // Check if explicitly allowed
-    if config.allowed_commands.contains_key(binary.as_ref()) {
-        return false;
-    }
-
-    config.dangerous_commands.contains(binary.as_ref())
-}
-
 /// Get the user config directory path
 #[allow(dead_code)]
 pub fn user_config_dir() -> Option<PathBuf> {
@@ -253,31 +76,6 @@ pub fn user_state_dir() -> Option<PathBuf> {
 // Helper functions for main.rs compatibility
 // These provide access to embedded config data without requiring full config loading
 // ============================================================================
-
-/// Get all sensitive paths from embedded config
-pub fn get_sensitive_paths() -> Result<Vec<String>> {
-    let lists = embedded::load_security_lists()?;
-    Ok(lists.all_sensitive_paths().into_iter().collect())
-}
-
-/// Get all dangerous commands from embedded config
-pub fn get_dangerous_commands() -> Result<HashSet<String>> {
-    let lists = embedded::load_security_lists()?;
-    Ok(lists.all_dangerous_commands())
-}
-
-/// Get system read paths for the current platform
-pub fn get_system_read_paths() -> Result<Vec<String>> {
-    let lists = embedded::load_security_lists()?;
-    Ok(lists.system_paths_for_platform())
-}
-
-/// Get macOS writable system paths (e.g., /tmp, /private/var/folders)
-#[cfg(target_os = "macos")]
-pub fn get_system_writable_paths() -> Result<Vec<String>> {
-    let lists = embedded::load_security_lists()?;
-    Ok(lists.macos_writable_paths())
-}
 
 /// Check if a command is blocked by the default dangerous commands list
 /// Returns Some(command_name) if blocked, None if allowed
@@ -304,8 +102,9 @@ pub fn check_blocked_command(
         return Ok(Some(binary_os.to_string_lossy().into_owned()));
     }
 
-    // Check default dangerous commands list from config
-    let dangerous = get_dangerous_commands()?;
+    // Check default dangerous commands list from policy.json
+    let loaded_policy = policy::load_embedded_policy()?;
+    let dangerous = policy::get_dangerous_commands(&loaded_policy);
     let binary_str = binary_os.to_string_lossy();
     if dangerous.contains(binary_str.as_ref()) {
         return Ok(Some(binary_str.into_owned()));
@@ -315,13 +114,11 @@ pub fn check_blocked_command(
 }
 
 /// Check if a path is in the sensitive paths list (for `nono why` command)
-/// Returns Some(reason) if blocked, None if not in list
+/// Returns Some(category_description) if blocked, None if not in list
 ///
 /// Uses `Path::starts_with()` for component-wise comparison, preventing
 /// bypass attacks like `~/.sshevil` matching `~/.ssh`.
-pub fn check_sensitive_path(path_str: &str) -> Result<Option<&'static str>> {
-    use security_lists::sensitive_paths_by_category;
-
+pub fn check_sensitive_path(path_str: &str) -> Result<Option<String>> {
     let home = validated_home()?;
     let expanded = if path_str.starts_with("~/") {
         path_str.replacen("~", &home, 1)
@@ -332,17 +129,14 @@ pub fn check_sensitive_path(path_str: &str) -> Result<Option<&'static str>> {
     };
     let expanded_path = Path::new(&expanded);
 
-    let lists = embedded::load_security_lists()?;
-    let categories = sensitive_paths_by_category(&lists);
+    let loaded_policy = policy::load_embedded_policy()?;
+    let sensitive = policy::get_sensitive_paths(&loaded_policy)?;
 
-    for (category_name, paths) in categories {
-        for sensitive in paths {
-            let expanded_sensitive = sensitive.replace('~', &home);
-            let sensitive_path = Path::new(&expanded_sensitive);
+    for (sensitive_expanded, description) in &sensitive {
+        let sensitive_path = Path::new(sensitive_expanded);
 
-            if expanded_path == sensitive_path || expanded_path.starts_with(sensitive_path) {
-                return Ok(Some(category_name));
-            }
+        if expanded_path == sensitive_path || expanded_path.starts_with(sensitive_path) {
+            return Ok(Some(description.clone()));
         }
     }
 
@@ -354,52 +148,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_override_info_from_cli() {
-        let info = OverrideInfo::from_cli("test reason");
-        assert_eq!(info.reason, "test reason");
-        assert_eq!(info.source, OverrideSource::CliFlag);
-        assert!(info.acknowledged.is_none());
+    fn test_check_blocked_command_basic() {
+        assert!(check_blocked_command("rm", &[], &[])
+            .expect("should not fail")
+            .is_some());
+        assert!(check_blocked_command("dd", &[], &[])
+            .expect("should not fail")
+            .is_some());
+        assert!(check_blocked_command("echo", &[], &[])
+            .expect("should not fail")
+            .is_none());
+        assert!(check_blocked_command("ls", &[], &[])
+            .expect("should not fail")
+            .is_none());
     }
 
     #[test]
-    fn test_is_dangerous_command() {
-        let mut config = EffectiveConfig::default();
-        config.dangerous_commands.insert("rm".to_string());
-        config.dangerous_commands.insert("dd".to_string());
-
-        assert!(is_dangerous_command("rm", &config));
-        assert!(is_dangerous_command("/bin/rm", &config));
-        assert!(is_dangerous_command("dd", &config));
-        assert!(!is_dangerous_command("ls", &config));
-        assert!(!is_dangerous_command("echo", &config));
+    fn test_check_blocked_command_with_path() {
+        assert!(check_blocked_command("/bin/rm", &[], &[])
+            .expect("should not fail")
+            .is_some());
+        assert!(check_blocked_command("/usr/bin/dd", &[], &[])
+            .expect("should not fail")
+            .is_some());
     }
 
     #[test]
-    fn test_is_sensitive_path_component_wise() {
-        let mut config = EffectiveConfig::default();
-        config.sensitive_paths.insert("/home/user/.ssh".to_string());
-
-        // Exact match
-        assert!(is_sensitive_path("/home/user/.ssh", &config).unwrap_or(false));
-        // Child path
-        assert!(is_sensitive_path("/home/user/.ssh/id_rsa", &config).unwrap_or(false));
-        // Path collision must NOT match (the fix for C1)
-        assert!(!is_sensitive_path("/home/user/.sshevil", &config).unwrap_or(false));
-        assert!(!is_sensitive_path("/home/user/.ssh_backup", &config).unwrap_or(false));
-        // Unrelated path
-        assert!(!is_sensitive_path("/home/user/projects", &config).unwrap_or(false));
+    fn test_check_blocked_command_with_override() {
+        let allowed = vec!["rm".to_string()];
+        assert!(check_blocked_command("rm", &allowed, &[])
+            .expect("should not fail")
+            .is_none());
+        assert!(check_blocked_command("dd", &allowed, &[])
+            .expect("should not fail")
+            .is_some());
     }
 
     #[test]
-    fn test_is_dangerous_command_with_override() {
-        let mut config = EffectiveConfig::default();
-        config.dangerous_commands.insert("pip".to_string());
-        config.allowed_commands.insert(
-            "pip".to_string(),
-            OverrideInfo::from_cli("needed for development"),
-        );
+    fn test_check_blocked_command_extra_blocked() {
+        let extra = vec!["custom-dangerous".to_string()];
+        assert!(check_blocked_command("custom-dangerous", &[], &extra)
+            .expect("should not fail")
+            .is_some());
+        assert!(check_blocked_command("rm", &[], &extra)
+            .expect("should not fail")
+            .is_some());
+    }
 
-        // Should not be considered dangerous when explicitly allowed
-        assert!(!is_dangerous_command("pip", &config));
+    #[test]
+    fn test_check_sensitive_path() {
+        assert!(check_sensitive_path("~/.ssh")
+            .expect("should not fail")
+            .is_some());
+        assert!(check_sensitive_path("~/.aws")
+            .expect("should not fail")
+            .is_some());
+        assert!(check_sensitive_path("~/.bashrc")
+            .expect("should not fail")
+            .is_some());
+        // /tmp is a system path, not sensitive
+        assert!(check_sensitive_path("/tmp")
+            .expect("should not fail")
+            .is_none());
+        // ~/Documents is not sensitive
+        assert!(check_sensitive_path("~/Documents")
+            .expect("should not fail")
+            .is_none());
+    }
+
+    #[test]
+    fn test_check_sensitive_path_component_wise() {
+        // ~/.sshevil must NOT match ~/.ssh (component-wise comparison)
+        let home = validated_home().expect("HOME must be set");
+        let evil_path = format!("{}/.sshevil", home);
+        assert!(check_sensitive_path(&evil_path)
+            .expect("should not fail")
+            .is_none());
+
+        // But ~/.ssh/id_rsa should match ~/.ssh
+        assert!(check_sensitive_path("~/.ssh/id_rsa")
+            .expect("should not fail")
+            .is_some());
     }
 }

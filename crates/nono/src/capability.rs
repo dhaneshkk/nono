@@ -344,32 +344,70 @@ impl CapabilitySet {
         !self.fs.is_empty()
     }
 
-    /// Deduplicate filesystem capabilities by resolved path
+    /// Deduplicate filesystem capabilities by resolved path.
     ///
-    /// For duplicates, keeps the highest access level (ReadWrite > Read/Write)
+    /// Priority rules:
+    /// 1. **User source wins over System/Group**: if the user explicitly chose
+    ///    `--read /tmp`, a system default of ReadWrite must not override it.
+    /// 2. **Among same-source entries**, highest access level wins
+    ///    (ReadWrite > Read/Write).
+    /// 3. **Symlink originals are preserved**: if any duplicate has
+    ///    `original != resolved` (e.g., `/tmp` -> `/private/tmp`), the surviving
+    ///    entry inherits that original so Seatbelt profile generation can emit
+    ///    rules for both the symlink and target paths.
     pub fn deduplicate(&mut self) {
         use std::collections::HashMap;
 
         // Group by (resolved path, is_file)
         let mut seen: HashMap<(PathBuf, bool), usize> = HashMap::new();
         let mut to_remove = Vec::new();
+        // Deferred updates: (target_index, new_original) to apply after iteration
+        let mut original_updates: Vec<(usize, PathBuf)> = Vec::new();
 
         for (i, cap) in self.fs.iter().enumerate() {
             let key = (cap.resolved.clone(), cap.is_file);
             if let Some(&existing_idx) = seen.get(&key) {
-                // Duplicate found - decide which to keep
                 let existing = &self.fs[existing_idx];
-                if cap.access == AccessMode::ReadWrite && existing.access != AccessMode::ReadWrite {
-                    // New one has higher access, remove old
+
+                // Determine which entry to keep.
+                // User-sourced entries always win over non-User entries
+                // regardless of access level (user intent takes priority).
+                let new_is_user = matches!(cap.source, CapabilitySource::User);
+                let existing_is_user = matches!(existing.source, CapabilitySource::User);
+
+                let keep_new = if new_is_user && !existing_is_user {
+                    // New is User, existing is System/Group -> keep User
+                    true
+                } else if !new_is_user && existing_is_user {
+                    // Existing is User, new is System/Group -> keep existing
+                    false
+                } else {
+                    // Same source category: highest access wins
+                    cap.access == AccessMode::ReadWrite && existing.access != AccessMode::ReadWrite
+                };
+
+                if keep_new {
                     to_remove.push(existing_idx);
                     seen.insert(key, i);
+                    // Preserve symlink original from the removed entry
+                    if cap.original == cap.resolved && existing.original != existing.resolved {
+                        original_updates.push((i, existing.original.clone()));
+                    }
                 } else {
-                    // Keep existing, remove new
+                    // Inherit symlink original from the entry being discarded
+                    if existing.original == existing.resolved && cap.original != cap.resolved {
+                        original_updates.push((existing_idx, cap.original.clone()));
+                    }
                     to_remove.push(i);
                 }
             } else {
                 seen.insert(key, i);
             }
+        }
+
+        // Apply deferred symlink original updates
+        for (idx, original) in original_updates {
+            self.fs[idx].original = original;
         }
 
         // Remove duplicates in reverse order to maintain indices
@@ -508,6 +546,129 @@ mod tests {
         assert_eq!(caps.fs_capabilities().len(), 1);
         // Should keep ReadWrite (higher access)
         assert_eq!(caps.fs_capabilities()[0].access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn test_deduplicate_user_wins_over_system() {
+        // User says --read /path, system says ReadWrite for same path.
+        // User intent must win: surviving entry should be Read.
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        assert_eq!(surviving.access, AccessMode::Read);
+        assert!(matches!(surviving.source, CapabilitySource::User));
+    }
+
+    #[test]
+    fn test_deduplicate_user_wins_over_system_reverse_order() {
+        // Same as above but system entry added first.
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        assert_eq!(surviving.access, AccessMode::Read);
+        assert!(matches!(surviving.source, CapabilitySource::User));
+    }
+
+    #[test]
+    fn test_deduplicate_preserves_symlink_original() {
+        // User adds --read /tmp (original: /tmp, resolved: /private/tmp, Read)
+        // System adds /private/tmp (original: /private/tmp, resolved: /private/tmp, ReadWrite)
+        // User wins: surviving entry should be Read with symlink original preserved
+        let symlink_path = PathBuf::from("/symlink/path");
+        let real_path = PathBuf::from("/real/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: symlink_path.clone(),
+            resolved: real_path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+        caps.add_fs(FsCapability {
+            original: real_path.clone(),
+            resolved: real_path.clone(),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        // User wins with Read access
+        assert_eq!(surviving.access, AccessMode::Read);
+        assert!(matches!(surviving.source, CapabilitySource::User));
+        // Symlink original preserved
+        assert_eq!(surviving.original, symlink_path);
+        assert_eq!(surviving.resolved, real_path);
+    }
+
+    #[test]
+    fn test_deduplicate_preserves_symlink_original_keep_existing() {
+        // System entry first (original == resolved),
+        // User entry second via symlink — User wins and inherits symlink
+        let symlink_path = PathBuf::from("/symlink/path");
+        let real_path = PathBuf::from("/real/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: real_path.clone(),
+            resolved: real_path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: symlink_path.clone(),
+            resolved: real_path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        // The symlink original must be inherited from the discarded entry
+        assert_eq!(surviving.original, symlink_path);
+        assert_eq!(surviving.resolved, real_path);
     }
 
     #[cfg(unix)]

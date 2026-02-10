@@ -60,20 +60,35 @@ impl QueryContext {
     }
 
     /// Query whether a path operation is permitted
+    ///
+    /// Uses a hybrid resolution strategy:
+    /// - If the path can be canonicalized, compare against `cap.resolved` (most accurate,
+    ///   follows full symlink chain).
+    /// - If canonicalization fails (path doesn't exist yet), fall back to comparing
+    ///   against both `cap.original` and `cap.resolved` to handle symlink aliases
+    ///   like `/tmp` -> `/private/tmp` on macOS.
     #[must_use]
     pub fn query_path(&self, path: &Path, requested: AccessMode) -> QueryResult {
-        // Check if any capability covers this path
+        // Try to canonicalize for the most accurate comparison.
+        // Falls back to raw path if the target doesn't exist yet.
+        let canonical = std::fs::canonicalize(path).ok();
+        let query_path = canonical.as_deref().unwrap_or(path);
+
         for cap in self.caps.fs_capabilities() {
             let covers = if cap.is_file {
-                // File capability - must be exact match
-                cap.resolved == path
+                // File capability: exact match against resolved, or if not
+                // canonicalized, also check against original
+                query_path == cap.resolved
+                    || (canonical.is_none() && path == cap.original.as_path())
             } else {
-                // Directory capability - path must be under the directory
-                path.starts_with(&cap.resolved)
+                // Directory capability: path must be under the directory.
+                // Check resolved first (canonical path), then original
+                // (symlink path) for non-existent paths.
+                query_path.starts_with(&cap.resolved)
+                    || (canonical.is_none() && path.starts_with(&cap.original))
             };
 
             if covers {
-                // Check if access mode is sufficient
                 let sufficient = matches!(
                     (cap.access, requested),
                     (AccessMode::ReadWrite, _)
@@ -138,6 +153,68 @@ mod tests {
             result,
             QueryResult::Denied(DenyReason::PathNotGranted)
         ));
+    }
+
+    #[test]
+    fn test_query_path_symlink_alias() {
+        // Simulates macOS /tmp -> /private/tmp: original is the symlink,
+        // resolved is the canonicalized target.
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/tmp"),
+            resolved: PathBuf::from("/private/tmp"),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let ctx = QueryContext::new(caps);
+
+        // Query via resolved path should match
+        let result = ctx.query_path(Path::new("/private/tmp/file.txt"), AccessMode::Read);
+        assert!(
+            matches!(result, QueryResult::Allowed(_)),
+            "resolved path should be allowed"
+        );
+
+        // Query via symlink path for a non-existent file should still match
+        // (falls back to checking cap.original since canonicalize fails)
+        let result = ctx.query_path(
+            Path::new("/tmp/nonexistent-query-test-file.txt"),
+            AccessMode::Write,
+        );
+        assert!(
+            matches!(result, QueryResult::Allowed(_)),
+            "symlink path for non-existent file should be allowed via original"
+        );
+    }
+
+    #[test]
+    fn test_query_path_existing_symlink_canonicalizes() {
+        // For an existing path through a symlink, canonicalization should
+        // resolve it to match cap.resolved.
+        // /tmp exists on macOS and resolves to /private/tmp
+        if !Path::new("/private/tmp").exists() {
+            return; // Skip on non-macOS
+        }
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/tmp"),
+            resolved: PathBuf::from("/private/tmp"),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+
+        let ctx = QueryContext::new(caps);
+
+        // /tmp itself exists and canonicalizes to /private/tmp
+        let result = ctx.query_path(Path::new("/tmp"), AccessMode::Read);
+        assert!(
+            matches!(result, QueryResult::Allowed(_)),
+            "existing symlink path should canonicalize and match resolved"
+        );
     }
 
     #[test]

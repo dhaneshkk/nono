@@ -745,7 +745,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nono"
-version = "0.3.0"
+version = "0.0.1"
 dependencies = [
  "keyring",
  "landlock",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "nono-cli"
-version = "0.3.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "clap",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "nono-ffi"
-version = "0.3.0"
+version = "0.0.1"
 dependencies = [
  "cbindgen",
  "nono",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "nono-napi"
-version = "0.3.0"
+version = "0.0.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "nono-python"
-version = "0.3.0"
+version = "0.0.1"
 dependencies = [
  "nono",
  "pyo3",

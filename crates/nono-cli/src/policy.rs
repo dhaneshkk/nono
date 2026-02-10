@@ -6,7 +6,7 @@
 
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -393,6 +393,113 @@ pub fn list_groups(policy: &Policy) -> Vec<&str> {
 #[allow(dead_code)]
 pub fn group_description<'a>(policy: &'a Policy, name: &str) -> Option<&'a str> {
     policy.groups.get(name).map(|g| g.description.as_str())
+}
+
+// ============================================================================
+// Query helpers: extract flat lists from policy groups
+// ============================================================================
+
+/// Get all sensitive (deny.access) paths from platform-matching policy groups.
+///
+/// Returns a list of `(expanded_path, group_description)` tuples suitable for
+/// display in `nono why`. Paths are expanded (~ -> $HOME, $TMPDIR -> value).
+pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<(String, String)>> {
+    let mut result = Vec::new();
+
+    for group in policy.groups.values() {
+        if !group_matches_platform(group) {
+            continue;
+        }
+        if let Some(deny) = &group.deny {
+            for path_str in &deny.access {
+                let expanded = expand_path(path_str)?;
+                result.push((
+                    expanded.to_string_lossy().into_owned(),
+                    group.description.clone(),
+                ));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Get all dangerous (deny.commands) from platform-matching policy groups.
+///
+/// Returns a flat set of command names that should be blocked.
+pub fn get_dangerous_commands(policy: &Policy) -> HashSet<String> {
+    let mut result = HashSet::new();
+
+    for group in policy.groups.values() {
+        if !group_matches_platform(group) {
+            continue;
+        }
+        if let Some(deny) = &group.deny {
+            for cmd in &deny.commands {
+                result.insert(cmd.clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Get all system read paths from allow.read groups for the current platform.
+///
+/// Collects `allow.read` entries from all platform-matching groups. Paths are
+/// returned unexpanded (with `~` and `$TMPDIR` intact) for caller to expand.
+/// Used by learn mode (Linux only).
+#[allow(dead_code)]
+pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for group in policy.groups.values() {
+        if !group_matches_platform(group) {
+            continue;
+        }
+        if let Some(allow) = &group.allow {
+            result.extend(allow.read.iter().cloned());
+        }
+    }
+
+    result
+}
+
+/// Common deny + system groups shared by all sandbox invocations.
+///
+/// This is the base set of groups that both `from_args()` (non-profile CLI)
+/// and built-in profiles use. Profiles extend this with additional groups.
+pub fn base_groups() -> Vec<String> {
+    vec![
+        "deny_credentials",
+        "deny_keychains_macos",
+        "deny_keychains_linux",
+        "deny_browser_data_macos",
+        "deny_browser_data_linux",
+        "deny_macos_private",
+        "deny_shell_history",
+        "deny_shell_configs",
+        "system_read_macos",
+        "system_read_linux",
+        "system_write_macos",
+        "system_write_linux",
+        "user_tools",
+        "homebrew",
+        "dangerous_commands",
+        "dangerous_commands_macos",
+        "dangerous_commands_linux",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+/// Load the embedded policy and return the parsed Policy struct.
+///
+/// Convenience wrapper that loads from the compile-time embedded JSON.
+pub fn load_embedded_policy() -> Result<Policy> {
+    let json = crate::config::embedded::embedded_policy_json();
+    load_policy(json)
 }
 
 // ============================================================================
