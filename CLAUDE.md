@@ -28,6 +28,7 @@ crates/nono-cli/src/                # CLI - security policy and UX
 ├── main.rs                         # Entry point, command routing
 ├── cli.rs                          # Clap argument definitions
 ├── capability_ext.rs               # CapabilitySetExt trait (CLI-specific construction)
+├── policy.rs                       # Group resolver: parse policy.json, filter, expand, resolve
 ├── query_ext.rs                    # CLI-specific query functions
 ├── sandbox_state.rs                # CLI-specific state handling
 ├── exec_strategy.rs                # Fork+exec with signal forwarding (Direct/Monitor/Supervised)
@@ -38,20 +39,15 @@ crates/nono-cli/src/                # CLI - security policy and UX
 ├── config/
 │   ├── mod.rs                      # Config module root
 │   ├── embedded.rs                 # Embedded data (build.rs artifacts)
-│   ├── security_lists.rs           # Sensitive paths and dangerous commands
 │   ├── user.rs                     # User configuration
 │   ├── verify.rs                   # Signature verification
 │   └── version.rs                  # Version tracking
 └── profile/
     ├── mod.rs                      # Profile loading
-    └── builtin.rs                  # Built-in profiles (embedded at build time)
+    └── builtin.rs                  # Built-in profiles (delegates to policy resolver)
 
 crates/nono-cli/data/               # Embedded at build time via build.rs
-├── security-lists.toml             # Sensitive paths and dangerous commands
-├── profiles/                       # Built-in profile TOML files
-│   ├── claude-code.toml
-│   ├── openclaw.toml
-│   └── opencode.toml
+├── policy.json                     # Groups, deny rules, built-in profiles (single source of truth)
 └── hooks/
     └── nono-hook.sh                # Hook script for Claude Code
 ```
@@ -62,8 +58,8 @@ The library is a **pure sandbox primitive**. It applies ONLY what clients explic
 
 | In Library | In CLI |
 |------------|--------|
-| `CapabilitySet` builder | Security lists (sensitive paths, dangerous commands) |
-| `Sandbox::apply()` | System paths (`/usr`, `/bin`, `/lib`, etc.) |
+| `CapabilitySet` builder | Policy groups (deny rules, dangerous commands, system paths) |
+| `Sandbox::apply()` | Group resolver (`policy.rs`) and platform-aware deny handling |
 | `SandboxState` | `ExecStrategy` (Direct/Monitor/Supervised) |
 | `DiagnosticFormatter` | Profile loading and hooks |
 | `QueryContext` | All output and UX |
@@ -130,6 +126,7 @@ make fmt             # Auto-format
 - Uses landlock crate for safe Rust bindings
 - Detects highest available ABI (v1-v5)
 - ABI v4+ includes TCP network filtering
+- Strictly allow-list: cannot express deny-within-allow. `deny.access`, `deny.unlink`, and `symlink_pairs` are macOS-only. Avoid broad allow groups that cover deny paths.
 
 ## Security Considerations
 
