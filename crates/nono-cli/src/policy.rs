@@ -4,6 +4,7 @@
 //! and platform-specific rules. This replaces the flat `security-lists.toml` approach
 //! with composable, platform-aware groups.
 
+use crate::profile;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +20,13 @@ use tracing::debug;
 pub struct Policy {
     #[allow(dead_code)]
     pub meta: PolicyMeta,
+    /// Default groups applied to all sandbox invocations
+    #[serde(default)]
+    pub base_groups: Vec<String>,
     pub groups: HashMap<String, Group>,
+    /// Built-in profile definitions
+    #[serde(default)]
+    pub profiles: HashMap<String, ProfileDef>,
 }
 
 /// Policy metadata
@@ -79,6 +86,62 @@ pub struct DenyOps {
     /// Commands to block
     #[serde(default)]
     pub commands: Vec<String>,
+}
+
+/// Profile definition as stored in policy.json
+///
+/// Separate from `profile::Profile` because in JSON `trust_groups` lives at the
+/// profile level and `security.groups` means "additional groups on top of base",
+/// not the complete merged list.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProfileDef {
+    #[serde(default)]
+    pub meta: profile::ProfileMeta,
+    #[serde(default)]
+    pub security: profile::SecurityConfig,
+    /// Base groups to exclude for this profile
+    #[serde(default)]
+    pub trust_groups: Vec<String>,
+    #[serde(default)]
+    pub filesystem: profile::FilesystemConfig,
+    #[serde(default)]
+    pub network: profile::NetworkConfig,
+    #[serde(default)]
+    pub secrets: profile::SecretsConfig,
+    #[serde(default)]
+    pub workdir: profile::WorkdirConfig,
+    #[serde(default)]
+    pub hooks: profile::HooksConfig,
+    #[serde(default)]
+    pub interactive: bool,
+}
+
+impl ProfileDef {
+    /// Convert to a full Profile with merged group list.
+    ///
+    /// Computes: `(base_groups - trust_groups) + security.groups`
+    pub fn to_profile(&self, base_groups: &[String]) -> profile::Profile {
+        let mut groups: Vec<String> = base_groups
+            .iter()
+            .filter(|g| !self.trust_groups.contains(g))
+            .cloned()
+            .collect();
+        groups.extend(self.security.groups.clone());
+
+        profile::Profile {
+            meta: self.meta.clone(),
+            security: profile::SecurityConfig {
+                groups,
+                trust_groups: self.trust_groups.clone(),
+            },
+            filesystem: self.filesystem.clone(),
+            network: self.network.clone(),
+            secrets: self.secrets.clone(),
+            workdir: self.workdir.clone(),
+            hooks: self.hooks.clone(),
+            interactive: self.interactive,
+        }
+    }
 }
 
 // ============================================================================
@@ -467,31 +530,32 @@ pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
 
 /// Common deny + system groups shared by all sandbox invocations.
 ///
-/// This is the base set of groups that both `from_args()` (non-profile CLI)
-/// and built-in profiles use. Profiles extend this with additional groups.
+/// Reads from the embedded policy.json `base_groups` array. This is the base
+/// set of groups that both `from_args()` (non-profile CLI) and built-in
+/// profiles use. Profiles extend this with additional groups.
 pub fn base_groups() -> Vec<String> {
-    vec![
-        "deny_credentials",
-        "deny_keychains_macos",
-        "deny_keychains_linux",
-        "deny_browser_data_macos",
-        "deny_browser_data_linux",
-        "deny_macos_private",
-        "deny_shell_history",
-        "deny_shell_configs",
-        "system_read_macos",
-        "system_read_linux",
-        "system_write_macos",
-        "system_write_linux",
-        "user_tools",
-        "homebrew",
-        "dangerous_commands",
-        "dangerous_commands_macos",
-        "dangerous_commands_linux",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    // The embedded policy must be valid at build time; a corrupted binary is fatal.
+    let policy = load_embedded_policy().expect("embedded policy.json must be valid");
+    policy.base_groups
+}
+
+/// Get a built-in profile from embedded policy.json.
+///
+/// Returns `None` if the profile name is not defined in policy.json.
+pub fn get_policy_profile(name: &str) -> Result<Option<profile::Profile>> {
+    let policy = load_embedded_policy()?;
+    Ok(policy
+        .profiles
+        .get(name)
+        .map(|def| def.to_profile(&policy.base_groups)))
+}
+
+/// List all built-in profile names from embedded policy.json.
+pub fn list_policy_profiles() -> Result<Vec<String>> {
+    let policy = load_embedded_policy()?;
+    let mut names: Vec<String> = policy.profiles.keys().cloned().collect();
+    names.sort();
+    Ok(names)
 }
 
 /// Load the embedded policy and return the parsed Policy struct.

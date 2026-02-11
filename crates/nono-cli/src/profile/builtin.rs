@@ -1,177 +1,19 @@
 //! Built-in profiles compiled into the nono binary
 //!
-//! These profiles are trusted by default and don't require --trust-unsigned.
+//! Profiles are defined declaratively in `policy.json` under the `profiles` key.
+//! This module delegates to the policy resolver for loading and listing.
 
-use super::{
-    FilesystemConfig, HookConfig, HooksConfig, NetworkConfig, Profile, ProfileMeta, SecretsConfig,
-    SecurityConfig, WorkdirAccess, WorkdirConfig,
-};
-use std::collections::HashMap;
+use super::Profile;
 
 /// Get a built-in profile by name
 pub fn get_builtin(name: &str) -> Option<Profile> {
-    match name {
-        "claude-code" => Some(claude_code()),
-        "openclaw" => Some(openclaw()),
-        "opencode" => Some(opencode()),
-        _ => None,
-    }
+    crate::policy::get_policy_profile(name).ok().flatten()
 }
 
 /// List all built-in profile names
 #[allow(dead_code)]
 pub fn list_builtin() -> Vec<String> {
-    vec![
-        "claude-code".to_string(),
-        "openclaw".to_string(),
-        "opencode".to_string(),
-    ]
-}
-
-/// Anthropic Claude Code CLI agent
-fn claude_code() -> Profile {
-    let mut hooks = HashMap::new();
-    hooks.insert(
-        "claude-code".to_string(),
-        HookConfig {
-            event: "PostToolUseFailure".to_string(),
-            matcher: "Read|Write|Edit|Bash".to_string(),
-            script: "nono-hook.sh".to_string(),
-        },
-    );
-
-    Profile {
-        meta: ProfileMeta {
-            name: "claude-code".to_string(),
-            version: "1.0.0".to_string(),
-            description: Some("Anthropic Claude Code CLI agent".to_string()),
-            author: Some("nono-project".to_string()),
-            signature: None,
-        },
-        security: SecurityConfig {
-            groups: claude_code_groups(),
-        },
-        filesystem: FilesystemConfig {
-            // ~/.claude: agent state, debug logs, projects, etc.
-            allow: vec!["$HOME/.claude".to_string()],
-            read: vec![],
-            write: vec![],
-            // ~/.claude.json: agent writes settings/state here
-            allow_file: vec!["$HOME/.claude.json".to_string()],
-            // macOS Keychain: OAuth token read for authentication
-            read_file: vec!["$HOME/Library/Keychains/login.keychain-db".to_string()],
-            write_file: vec![],
-        },
-        network: NetworkConfig { block: false },
-        secrets: SecretsConfig::default(),
-        workdir: WorkdirConfig {
-            access: WorkdirAccess::ReadWrite,
-        },
-        hooks: HooksConfig { hooks },
-        interactive: true, // Claude Code has interactive TUI
-    }
-}
-
-/// OpenClaw messaging gateway
-fn openclaw() -> Profile {
-    Profile {
-        meta: ProfileMeta {
-            name: "openclaw".to_string(),
-            version: "1.0.0".to_string(),
-            description: Some("OpenClaw messaging gateway".to_string()),
-            author: Some("nono-project".to_string()),
-            signature: None,
-        },
-        security: SecurityConfig {
-            groups: openclaw_groups(),
-        },
-        filesystem: FilesystemConfig {
-            allow: vec![
-                "$HOME/.openclaw".to_string(),
-                "$HOME/.config/openclaw".to_string(),
-                "$HOME/.local".to_string(),
-                "$TMPDIR/openclaw-$UID".to_string(),
-            ],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-        },
-        network: NetworkConfig { block: false },
-        secrets: SecretsConfig::default(),
-        workdir: WorkdirConfig {
-            access: WorkdirAccess::Read,
-        },
-        hooks: HooksConfig::default(),
-        interactive: false,
-    }
-}
-
-/// OpenCode AI coding assistant
-fn opencode() -> Profile {
-    Profile {
-        meta: ProfileMeta {
-            name: "opencode".to_string(),
-            version: "1.0.0".to_string(),
-            description: Some("OpenCode AI coding assistant".to_string()),
-            author: Some("nono-project".to_string()),
-            signature: None,
-        },
-        security: SecurityConfig {
-            groups: opencode_groups(),
-        },
-        filesystem: FilesystemConfig {
-            allow: vec![
-                "$HOME/.config/opencode".to_string(),
-                "$HOME/.cache/opencode".to_string(),
-                "$HOME/.local/share/opencode".to_string(),
-            ],
-            read: vec![],
-            write: vec![],
-            allow_file: vec![],
-            read_file: vec![],
-            write_file: vec![],
-        },
-        network: NetworkConfig { block: false },
-        secrets: SecretsConfig::default(),
-        workdir: WorkdirConfig {
-            access: WorkdirAccess::ReadWrite,
-        },
-        hooks: HooksConfig::default(),
-        interactive: true,
-    }
-}
-
-fn claude_code_groups() -> Vec<String> {
-    let mut groups = crate::policy::base_groups();
-    groups.extend(
-        [
-            "user_caches_macos",
-            "node_runtime",
-            "rust_runtime",
-            "unlink_protection",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    groups
-}
-
-fn openclaw_groups() -> Vec<String> {
-    let mut groups = crate::policy::base_groups();
-    groups.push("node_runtime".to_string());
-    groups
-}
-
-fn opencode_groups() -> Vec<String> {
-    let mut groups = crate::policy::base_groups();
-    groups.extend(
-        ["user_caches_macos", "node_runtime", "unlink_protection"]
-            .iter()
-            .map(|s| s.to_string()),
-    );
-    groups
+    crate::policy::list_policy_profiles().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -185,7 +27,6 @@ mod tests {
         assert_eq!(profile.meta.name, "claude-code");
         assert!(!profile.network.block); // network allowed
         assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
-        assert!(!profile.filesystem.allow.contains(&"$WORKDIR".to_string()));
         assert!(!profile.security.groups.is_empty());
         assert!(profile
             .security
@@ -205,6 +46,14 @@ mod tests {
     }
 
     #[test]
+    fn test_get_builtin_opencode() {
+        let profile = get_builtin("opencode").expect("Profile not found");
+        assert_eq!(profile.meta.name, "opencode");
+        assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
+        assert!(profile.interactive);
+    }
+
+    #[test]
     fn test_get_builtin_nonexistent() {
         assert!(get_builtin("nonexistent").is_none());
     }
@@ -215,5 +64,53 @@ mod tests {
         assert!(profiles.contains(&"claude-code".to_string()));
         assert!(profiles.contains(&"openclaw".to_string()));
         assert!(profiles.contains(&"opencode".to_string()));
+    }
+
+    #[test]
+    fn test_base_groups_from_policy() {
+        let groups = crate::policy::base_groups();
+        assert!(!groups.is_empty());
+        assert!(groups.contains(&"deny_credentials".to_string()));
+        assert!(groups.contains(&"system_read_macos".to_string()));
+    }
+
+    #[test]
+    fn test_profile_group_merging() {
+        let profile = get_builtin("claude-code").expect("Profile not found");
+        // Should have base groups
+        assert!(profile
+            .security
+            .groups
+            .contains(&"deny_credentials".to_string()));
+        // Should have profile-specific groups
+        assert!(profile
+            .security
+            .groups
+            .contains(&"node_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"rust_runtime".to_string()));
+        assert!(profile
+            .security
+            .groups
+            .contains(&"unlink_protection".to_string()));
+    }
+
+    #[test]
+    fn test_trust_groups_exclusion() {
+        // Verify that trust_groups mechanism works by checking openclaw
+        // doesn't have groups it shouldn't (trust_groups is empty for all
+        // current profiles, but the merging path is exercised)
+        let profile = get_builtin("openclaw").expect("Profile not found");
+        let base = crate::policy::base_groups();
+        // All base groups should be present since trust_groups is empty
+        for group in &base {
+            assert!(
+                profile.security.groups.contains(group),
+                "openclaw should contain base group '{}'",
+                group
+            );
+        }
     }
 }

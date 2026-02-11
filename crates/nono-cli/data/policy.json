@@ -1,8 +1,27 @@
 {
   "meta": {
-    "version": 2,
-    "schema_version": "2.0"
+    "version": 3,
+    "schema_version": "3.0"
   },
+  "base_groups": [
+    "deny_credentials",
+    "deny_keychains_macos",
+    "deny_keychains_linux",
+    "deny_browser_data_macos",
+    "deny_browser_data_linux",
+    "deny_macos_private",
+    "deny_shell_history",
+    "deny_shell_configs",
+    "system_read_macos",
+    "system_read_linux",
+    "system_write_macos",
+    "system_write_linux",
+    "user_tools",
+    "homebrew",
+    "dangerous_commands",
+    "dangerous_commands_macos",
+    "dangerous_commands_linux"
+  ],
   "groups": {
     "deny_credentials": {
       "description": "Block access to cryptographic keys, tokens, and cloud credentials",
@@ -394,6 +413,80 @@
           "pkexec"
         ]
       }
+    }
+  },
+  "profiles": {
+    "claude-code": {
+      "meta": {
+        "name": "claude-code",
+        "version": "1.0.0",
+        "description": "Anthropic Claude Code CLI agent",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["user_caches_macos", "node_runtime", "rust_runtime", "unlink_protection"]
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": ["$HOME/.claude"],
+        "allow_file": ["$HOME/.claude.json"],
+        "read_file": ["$HOME/Library/Keychains/login.keychain-db"]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "hooks": {
+        "claude-code": {
+          "event": "PostToolUseFailure",
+          "matcher": "Read|Write|Edit|Bash",
+          "script": "nono-hook.sh"
+        }
+      },
+      "interactive": true
+    },
+    "openclaw": {
+      "meta": {
+        "name": "openclaw",
+        "version": "1.0.0",
+        "description": "OpenClaw messaging gateway",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["node_runtime"]
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": [
+          "$HOME/.openclaw",
+          "$HOME/.config/openclaw",
+          "$HOME/.local",
+          "$TMPDIR/openclaw-$UID"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "read" },
+      "interactive": false
+    },
+    "opencode": {
+      "meta": {
+        "name": "opencode",
+        "version": "1.0.0",
+        "description": "OpenCode AI coding assistant",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["user_caches_macos", "node_runtime", "unlink_protection"]
+      },
+      "trust_groups": [],
+      "filesystem": {
+        "allow": [
+          "$HOME/.config/opencode",
+          "$HOME/.cache/opencode",
+          "$HOME/.local/share/opencode"
+        ]
+      },
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": true
     }
   }
 }

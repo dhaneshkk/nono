@@ -131,6 +131,12 @@ pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Base groups to exclude for this profile (overrides base policy).
+    /// Populated during deserialization; read by `ProfileDef::to_profile()` in the
+    /// policy resolver. Will also be consumed by `--trust-group` CLI flag handling.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub trust_groups: Vec<String>,
 }
 
 /// A complete profile definition
