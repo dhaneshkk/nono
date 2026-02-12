@@ -12,8 +12,8 @@
 //! - Returned `char*` strings are caller-owned. Free with
 //!   `nono_string_free()`. NULL is safe to pass.
 //!
-//! - `nono_last_error()` returns a library-owned pointer valid until the
-//!   next failing FFI call on the same thread. Do NOT free it.
+//! - `nono_last_error()` returns a caller-owned string. Free with
+//!   `nono_string_free()`. Returns NULL if no error has occurred.
 //!
 //! - Input `const char*` parameters are borrowed. The library copies what
 //!   it needs.
@@ -129,18 +129,25 @@ pub(crate) unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 
 /// Get the last error message for the current thread.
 ///
-/// Returns a pointer to a null-terminated UTF-8 string describing the most
-/// recent error, or NULL if no error has occurred.
+/// Returns a caller-owned copy of the last error message as a
+/// null-terminated UTF-8 string, or NULL if no error has occurred.
 ///
-/// The returned pointer is valid until the next failing nono FFI call on
-/// the same thread. Callers must NOT free this pointer.
+/// Caller must free the returned string with `nono_string_free()`.
 #[no_mangle]
-pub extern "C" fn nono_last_error() -> *const c_char {
+pub extern "C" fn nono_last_error() -> *mut c_char {
     LAST_ERROR.with(|cell| {
         let borrow = cell.borrow();
         match borrow.as_ref() {
-            Some(cstr) => cstr.as_ptr(),
-            None => std::ptr::null(),
+            Some(cstr) => {
+                // Return an independent copy so the caller owns the memory.
+                // This avoids dangling pointers if set_last_error() is called
+                // before the caller is done with the string.
+                match CString::new(cstr.as_bytes().to_vec()) {
+                    Ok(copy) => copy.into_raw(),
+                    Err(_) => std::ptr::null_mut(),
+                }
+            }
+            None => std::ptr::null_mut(),
         }
     })
 }
@@ -155,10 +162,9 @@ pub extern "C" fn nono_clear_error() {
 
 /// Free a string previously returned by a nono FFI function.
 ///
-/// NULL-safe (no-op on NULL). Only call this on strings whose documentation
-/// says "Caller must free with `nono_string_free()`".
-///
-/// Do NOT call this on the pointer from `nono_last_error()`.
+/// NULL-safe (no-op on NULL). Call this on any string whose documentation
+/// says "Caller must free with `nono_string_free()`", including
+/// `nono_last_error()` and `nono_version()`.
 ///
 /// # Safety
 ///
@@ -202,11 +208,40 @@ mod tests {
         set_last_error("test error message");
         let ptr = nono_last_error();
         assert!(!ptr.is_null());
-        // SAFETY: ptr is valid, just set above.
+        // SAFETY: ptr is a caller-owned CString, just returned above.
         let msg = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or_default();
         assert_eq!(msg, "test error message");
+        // SAFETY: ptr was returned by nono_last_error().
+        unsafe { nono_string_free(ptr) };
         nono_clear_error();
         assert!(nono_last_error().is_null());
+    }
+
+    #[test]
+    fn test_last_error_independent_copies() {
+        // Each call to nono_last_error returns an independent copy, so
+        // overwriting the stored error does not invalidate earlier pointers.
+        set_last_error("first error");
+        let ptr1 = nono_last_error();
+        assert!(!ptr1.is_null());
+
+        set_last_error("second error");
+
+        // SAFETY: ptr1 is caller-owned, not tied to the thread-local.
+        let msg1 = unsafe { CStr::from_ptr(ptr1) }.to_str().unwrap_or_default();
+        assert_eq!(msg1, "first error");
+
+        let ptr2 = nono_last_error();
+        // SAFETY: ptr2 is caller-owned.
+        let msg2 = unsafe { CStr::from_ptr(ptr2) }.to_str().unwrap_or_default();
+        assert_eq!(msg2, "second error");
+
+        // SAFETY: both pointers were returned by nono_last_error().
+        unsafe {
+            nono_string_free(ptr1);
+            nono_string_free(ptr2);
+        }
+        nono_clear_error();
     }
 
     #[test]

@@ -373,6 +373,7 @@ mod tests {
 
             let err = crate::nono_last_error();
             assert!(!err.is_null());
+            crate::nono_string_free(err);
             nono_capability_set_free(caps);
         }
     }

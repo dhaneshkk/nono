@@ -201,13 +201,12 @@ typedef struct NonoSupportInfo {
 /**
  * Get the last error message for the current thread.
  *
- * Returns a pointer to a null-terminated UTF-8 string describing the most
- * recent error, or NULL if no error has occurred.
+ * Returns a caller-owned copy of the last error message as a
+ * null-terminated UTF-8 string, or NULL if no error has occurred.
  *
- * The returned pointer is valid until the next failing nono FFI call on
- * the same thread. Callers must NOT free this pointer.
+ * Caller must free the returned string with `nono_string_free()`.
  */
-const char *nono_last_error(void);
+char *nono_last_error(void);
 
 /**
  * Clear the last error for the current thread.
@@ -217,10 +216,9 @@ void nono_clear_error(void);
 /**
  * Free a string previously returned by a nono FFI function.
  *
- * NULL-safe (no-op on NULL). Only call this on strings whose documentation
- * says "Caller must free with `nono_string_free()`".
- *
- * Do NOT call this on the pointer from `nono_last_error()`.
+ * NULL-safe (no-op on NULL). Call this on any string whose documentation
+ * says "Caller must free with `nono_string_free()`", including
+ * `nono_last_error()` and `nono_version()`.
  *
  * # Safety
  *
