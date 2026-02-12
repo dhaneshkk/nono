@@ -149,8 +149,13 @@ impl std::fmt::Display for FsCapability {
 ///
 /// Rejects rules that:
 /// - Don't start with `(` (malformed S-expressions)
+/// - Contain unbalanced parentheses
 /// - Grant root-level filesystem access `(allow file-read* (subpath "/"))`
 /// - Grant root-level write access `(allow file-write* (subpath "/"))`
+///
+/// Validation is performed on tokenized S-expression content with comments
+/// stripped, so whitespace variations and `#| ... |#` block comments cannot
+/// bypass the checks.
 fn validate_platform_rule(rule: &str) -> Result<()> {
     let trimmed = rule.trim();
 
@@ -161,20 +166,159 @@ fn validate_platform_rule(rule: &str) -> Result<()> {
         )));
     }
 
-    // Reject rules that grant root-level filesystem access
-    let normalized = trimmed.replace(' ', "");
-    if normalized.contains("(allowfile-read*(subpath\"/\"))") {
-        return Err(NonoError::SandboxInit(
-            "platform rule must not grant root-level read access".to_string(),
-        ));
+    let tokens = tokenize_sexp(trimmed)?;
+
+    // Check for balanced parentheses
+    let mut depth: i32 = 0;
+    for tok in &tokens {
+        match tok.as_str() {
+            "(" => depth = depth.saturating_add(1),
+            ")" => {
+                depth = depth.saturating_sub(1);
+                if depth < 0 {
+                    return Err(NonoError::SandboxInit(format!(
+                        "platform rule has unbalanced parentheses: {rule}"
+                    )));
+                }
+            }
+            _ => {}
+        }
     }
-    if normalized.contains("(allowfile-write*(subpath\"/\"))") {
-        return Err(NonoError::SandboxInit(
-            "platform rule must not grant root-level write access".to_string(),
-        ));
+    if depth != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "platform rule has unbalanced parentheses: {rule}"
+        )));
+    }
+
+    // Look for dangerous patterns: (allow file-read* (subpath "/"))
+    // and (allow file-write* (subpath "/"))
+    // We check the non-parenthesis tokens for the sequence:
+    // "allow", file-read*/file-write*, "subpath", "/"
+    let content_tokens: Vec<&str> = tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|t| *t != "(" && *t != ")")
+        .collect();
+    for window in content_tokens.windows(4) {
+        if window[0] == "allow"
+            && (window[1] == "file-read*" || window[1] == "file-write*")
+            && window[2] == "subpath"
+            && window[3] == "/"
+        {
+            let kind = if window[1] == "file-read*" {
+                "read"
+            } else {
+                "write"
+            };
+            return Err(NonoError::SandboxInit(format!(
+                "platform rule must not grant root-level {kind} access"
+            )));
+        }
     }
 
     Ok(())
+}
+
+/// Tokenize an S-expression string, stripping `#| ... |#` block comments
+/// and `;` line comments. Parentheses and quoted strings are returned as
+/// individual tokens.
+fn tokenize_sexp(input: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(&c) = chars.peek() {
+        match c {
+            // Whitespace: skip
+            c if c.is_ascii_whitespace() => {
+                chars.next();
+            }
+            // Block comment: #| ... |#
+            '#' => {
+                chars.next();
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    let mut closed = false;
+                    while let Some(cc) = chars.next() {
+                        if cc == '|' && chars.peek() == Some(&'#') {
+                            chars.next();
+                            closed = true;
+                            break;
+                        }
+                    }
+                    if !closed {
+                        return Err(NonoError::SandboxInit(
+                            "platform rule has unterminated block comment".to_string(),
+                        ));
+                    }
+                } else {
+                    // Bare '#' is part of a token
+                    let mut tok = String::from('#');
+                    while let Some(&nc) = chars.peek() {
+                        if nc.is_ascii_whitespace() || nc == '(' || nc == ')' || nc == '"' {
+                            break;
+                        }
+                        tok.push(nc);
+                        chars.next();
+                    }
+                    tokens.push(tok);
+                }
+            }
+            // Line comment: ; until end of line
+            ';' => {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '\n' {
+                        break;
+                    }
+                }
+            }
+            // Parentheses: individual tokens
+            '(' | ')' => {
+                tokens.push(String::from(c));
+                chars.next();
+            }
+            // Quoted string: extract content without quotes
+            '"' => {
+                chars.next();
+                let mut s = String::new();
+                let mut closed = false;
+                while let Some(sc) = chars.next() {
+                    if sc == '\\' {
+                        // Consume escaped character
+                        if let Some(esc) = chars.next() {
+                            s.push(esc);
+                        }
+                    } else if sc == '"' {
+                        closed = true;
+                        break;
+                    } else {
+                        s.push(sc);
+                    }
+                }
+                if !closed {
+                    return Err(NonoError::SandboxInit(
+                        "platform rule has unterminated string".to_string(),
+                    ));
+                }
+                tokens.push(s);
+            }
+            // Bare token
+            _ => {
+                let mut tok = String::new();
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_whitespace() || nc == '(' || nc == ')' || nc == '"' {
+                        break;
+                    }
+                    tok.push(nc);
+                    chars.next();
+                }
+                tokens.push(tok);
+            }
+        }
+    }
+
+    Ok(tokens)
 }
 
 /// The complete set of capabilities granted to the sandbox
@@ -715,5 +859,53 @@ mod tests {
         assert!(caps
             .add_platform_rule("(allow file-read* (subpath \"/usr\"))")
             .is_ok());
+    }
+
+    #[test]
+    fn test_platform_rule_validation_rejects_whitespace_bypass() {
+        let mut caps = CapabilitySet::new();
+        // Tab-separated
+        assert!(caps
+            .add_platform_rule("(allow\tfile-read*\t(subpath\t\"/\"))")
+            .is_err());
+        // Extra spaces
+        assert!(caps
+            .add_platform_rule("(allow  file-read*  (subpath  \"/\"))")
+            .is_err());
+        // Mixed whitespace
+        assert!(caps
+            .add_platform_rule("(allow \t file-write* \t (subpath \"/\"))")
+            .is_err());
+    }
+
+    #[test]
+    fn test_platform_rule_validation_rejects_comment_bypass() {
+        let mut caps = CapabilitySet::new();
+        // Block comment between tokens
+        assert!(caps
+            .add_platform_rule("(allow file-read* #| comment |# (subpath \"/\"))")
+            .is_err());
+        // Block comment inside nested expression
+        assert!(caps
+            .add_platform_rule("(allow #| sneaky |# file-write* (subpath \"/\"))")
+            .is_err());
+    }
+
+    #[test]
+    fn test_platform_rule_validation_rejects_unbalanced_parens() {
+        let mut caps = CapabilitySet::new();
+        assert!(caps.add_platform_rule("(deny file-read*").is_err());
+        assert!(caps.add_platform_rule("(deny file-read*))").is_err());
+    }
+
+    #[test]
+    fn test_platform_rule_validation_rejects_unterminated_constructs() {
+        let mut caps = CapabilitySet::new();
+        assert!(caps
+            .add_platform_rule("(deny file-read* #| unterminated comment")
+            .is_err());
+        assert!(caps
+            .add_platform_rule("(deny file-read* (subpath \"/usr))")
+            .is_err());
     }
 }
