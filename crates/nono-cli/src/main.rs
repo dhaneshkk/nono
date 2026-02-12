@@ -344,6 +344,18 @@ fn execute_sandboxed(
     Sandbox::apply(caps)?;
     output::print_sandbox_active(silent);
 
+    // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
+    // A malicious profile could map a keystore secret to a linker/interpreter
+    // injection variable, bypassing the env var filter.
+    for secret in &loaded_secrets {
+        if exec_strategy::is_dangerous_env_var(&secret.env_var) {
+            return Err(NonoError::ConfigParse(format!(
+                "secret mapping targets dangerous environment variable: {}",
+                secret.env_var
+            )));
+        }
+    }
+
     // Build environment variables for the command
     let env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
@@ -392,6 +404,10 @@ fn execute_sandboxed(
             if cap_file_path.exists() {
                 let _ = std::fs::remove_file(&cap_file_path);
             }
+            // Explicitly drop borrows then secrets so Zeroizing destructors
+            // run before std::process::exit() which skips destructors.
+            drop(config);
+            drop(loaded_secrets);
             std::process::exit(exit_code);
         }
         exec_strategy::ExecStrategy::Supervised => Err(NonoError::SandboxInit(

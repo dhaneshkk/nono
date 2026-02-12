@@ -164,8 +164,13 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
     // Allow specific system operations
     profile.push_str("(allow sysctl-read)\n");
 
-    // Mach IPC: allow only service resolution and identity, deny privileged ops
+    // Mach IPC: allow service resolution but deny Keychain/security services.
+    // Secrets are loaded BEFORE the sandbox is applied, so securityd access is
+    // not needed afterward. Without these denies, the blanket mach-lookup allow
+    // permits Keychain retrieval via Mach IPC, bypassing file-level deny rules.
     profile.push_str("(allow mach-lookup)\n");
+    profile.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
+    profile.push_str("(deny mach-lookup (global-name \"com.apple.securityd\"))\n");
     profile.push_str("(allow mach-per-user-lookup)\n");
     profile.push_str("(allow mach-task-name)\n");
     profile.push_str("(deny mach-priv*)\n");

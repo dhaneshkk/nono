@@ -64,7 +64,13 @@ pub fn load_secrets(
     Ok(secrets)
 }
 
-/// Load a single secret from the keystore
+/// Load a single secret from the keystore.
+///
+/// The returned value is immediately wrapped in `Zeroizing` so the heap
+/// buffer will be zeroed on drop. Note: the keyring crate may create
+/// intermediate heap allocations internally (e.g. during UTF-8 conversion)
+/// that are freed without being zeroed. This is a known limitation of the
+/// keyring crate that we cannot address from the caller side.
 fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>> {
     let entry = keyring::Entry::new(service, account).map_err(|e| {
         NonoError::KeystoreAccess(format!(
@@ -75,6 +81,9 @@ fn load_single_secret(service: &str, account: &str) -> Result<Zeroizing<String>>
 
     match entry.get_password() {
         Ok(password) => {
+            // Immediately wrap in Zeroizing so the String's heap buffer is
+            // zeroed when the secret is dropped. The move does not copy the
+            // heap allocation - it transfers ownership of the same buffer.
             tracing::debug!("Successfully loaded secret '{}'", account);
             Ok(Zeroizing::new(password))
         }

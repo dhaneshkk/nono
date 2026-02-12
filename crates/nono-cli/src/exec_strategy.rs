@@ -51,7 +51,7 @@ const MAX_KEYRING_THREADS: usize = 4;
 /// Covers linker injection (LD_PRELOAD, DYLD_INSERT_LIBRARIES), shell startup
 /// injection (BASH_ENV, PROMPT_COMMAND, IFS), and interpreter code/module injection
 /// (NODE_OPTIONS, PYTHONPATH, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, etc.).
-fn is_dangerous_env_var(key: &str) -> bool {
+pub(crate) fn is_dangerous_env_var(key: &str) -> bool {
     // Linker injection
     key.starts_with("LD_")
         || key.starts_with("DYLD_")
@@ -296,8 +296,14 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
     }
 
     // Add user-specified environment variables (secrets, etc.)
+    // Pre-allocate with room for the null terminator to prevent CString::new
+    // from reallocating, which would leave a non-zeroized copy of secret values.
     for (key, value) in &config.env_vars {
-        if let Ok(cstr) = CString::new(format!("{}={}", key, value)) {
+        let mut kv = Vec::with_capacity(key.len() + 1 + value.len() + 1);
+        kv.extend_from_slice(key.as_bytes());
+        kv.push(b'=');
+        kv.extend_from_slice(value.as_bytes());
+        if let Ok(cstr) = CString::new(kv) {
             env_c.push(cstr);
         }
     }
@@ -393,6 +399,16 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
     match fork_result {
         Ok(ForkResult::Child) => {
             // CHILD: No allocations allowed from here until exec()
+
+            // Prevent /proc/pid/environ from being readable during the
+            // fork-to-exec window (secrets may be in the environment).
+            // prctl() is async-signal-safe so this is safe after fork.
+            // Note: execve() resets dumpable to 1, so this only protects
+            // the interval between fork and exec.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+            }
 
             // Close read ends of pipes
             unsafe {
