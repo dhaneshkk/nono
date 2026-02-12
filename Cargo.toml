@@ -3,8 +3,6 @@ resolver = "2"
 members = [
     "crates/nono",
     "crates/nono-cli",
-    "bindings/python",
-    "bindings/node",
     "bindings/c",
 ]
 
@@ -34,14 +32,6 @@ zeroize = { version = "1", features = ["alloc"] }
 
 # Testing
 tempfile = "3"
-
-# Python bindings (PyO3)
-pyo3 = { version = "0.24", features = ["abi3-py39"] }
-
-# Node.js bindings (napi-rs)
-napi = { version = "3", default-features = false, features = ["napi9"] }
-napi-derive = "3"
-napi-build = "2"
 
 # C FFI bindings
 cbindgen = "0.27"
