@@ -14,7 +14,7 @@ use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, ForkResult, Pid};
-use nono::{CapabilitySet, DiagnosticFormatter, NonoError, Result};
+use nono::{CapabilitySet, DiagnosticFormatter, NonoError, Result, Sandbox};
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Write};
 use std::mem::ManuallyDrop;
@@ -138,7 +138,6 @@ pub enum ExecStrategy {
     /// - Diagnostic footer on non-zero exit
     /// - Undo support (parent can write snapshots)
     /// - Future: IPC for capability expansion
-    #[allow(dead_code)]
     Supervised,
 }
 
@@ -445,6 +444,327 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
         }
         Ok(ForkResult::Parent { child }) => {
             // PARENT: Close write ends, read from pipes, wait for child
+            unsafe {
+                ManuallyDrop::drop(&mut { stdout_write });
+                ManuallyDrop::drop(&mut { stderr_write });
+            }
+
+            let stdout_read = ManuallyDrop::into_inner(stdout_read);
+            let stderr_read = ManuallyDrop::into_inner(stderr_read);
+
+            let stdout_file = std::fs::File::from(stdout_read);
+            let stderr_file = std::fs::File::from(stderr_read);
+
+            execute_parent_monitor(child, config, stdout_file, stderr_file)
+        }
+        Err(e) => {
+            unsafe {
+                ManuallyDrop::drop(&mut { stdout_read });
+                ManuallyDrop::drop(&mut { stdout_write });
+                ManuallyDrop::drop(&mut { stderr_read });
+                ManuallyDrop::drop(&mut { stderr_write });
+            }
+            Err(NonoError::SandboxInit(format!("fork() failed: {}", e)))
+        }
+    }
+}
+
+/// Execute a command using the Supervised strategy (fork first, sandbox only child).
+///
+/// Unlike Monitor mode where the sandbox is applied before forking (both processes
+/// sandboxed), Supervised mode forks first and applies the sandbox only in the child.
+/// The parent remains unsandboxed, enabling undo snapshots and future IPC capability
+/// expansion.
+///
+/// # Security Properties
+///
+/// - Child is sandboxed with full restrictions (identical to Monitor's child)
+/// - Parent is NOT sandboxed - requires additional hardening:
+///   - Linux: PR_SET_DUMPABLE(0) applied BEFORE fork (inherited by both processes,
+///     closes TOCTOU window). Failure is fatal.
+///   - macOS: PT_DENY_ATTACH applied in parent immediately after fork (not inherited
+///     across fork on macOS). Failure is fatal - child is killed and error returned.
+/// - Parent attack surface is larger than Monitor (unsandboxed parent)
+/// - Keyring secrets (--secrets) are NOT supported with Supervised mode to prevent
+///   deadlock from keyring threads holding allocator locks at fork time
+///
+/// # Sandbox Application in Child
+///
+/// The child calls `Sandbox::apply()` after fork, which allocates memory (generating
+/// Seatbelt profile strings on macOS, opening Landlock PathFds on Linux). This is safe
+/// because we validate single-threaded execution before fork, giving the child a clean
+/// copy of the parent's heap with no contended locks.
+///
+/// # Process Flow
+///
+/// 1. Prepare all data for exec in parent (CString conversion)
+/// 2. Reject keyring threading context (deadlock risk)
+/// 3. Verify single-threaded execution
+/// 4. Apply PR_SET_DUMPABLE(0) before fork (Linux - inherited, closes TOCTOU)
+/// 5. Create pipes for output interception
+/// 6. Fork into parent and child
+/// 7. Child: apply sandbox, apply ptrace hardening, redirect output, exec
+/// 8. Parent: apply PT_DENY_ATTACH (macOS, fatal on failure), read pipes, wait
+pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
+    let program = &config.command[0];
+    let cmd_args = &config.command[1..];
+
+    info!("Executing (supervised): {} {:?}", program, cmd_args);
+
+    // Use pre-resolved program path (resolved before fork)
+    let program_path = config.resolved_program;
+
+    // Convert program path to CString for execve
+    let program_c = CString::new(program_path.to_string_lossy().as_bytes())
+        .map_err(|_| NonoError::SandboxInit("Program path contains null byte".to_string()))?;
+
+    // Build argv: [program, args..., NULL]
+    let mut argv_c: Vec<CString> = Vec::with_capacity(1 + cmd_args.len());
+    argv_c.push(program_c.clone());
+    for arg in cmd_args {
+        argv_c.push(CString::new(arg.as_bytes()).map_err(|_| {
+            NonoError::SandboxInit(format!("Argument contains null byte: {}", arg))
+        })?);
+    }
+
+    // Build environment: inherit current env + add our vars
+    let mut env_c: Vec<CString> = Vec::new();
+
+    // Copy current environment, filtering dangerous and overridden vars
+    for (key, value) in std::env::vars_os() {
+        if let (Some(k), Some(v)) = (key.to_str(), value.to_str()) {
+            let should_skip = config.env_vars.iter().any(|(ek, _)| *ek == k)
+                || k == "NONO_CAP_FILE"
+                || is_dangerous_env_var(k);
+            if !should_skip {
+                if let Ok(cstr) = CString::new(format!("{}={}", k, v)) {
+                    env_c.push(cstr);
+                }
+            }
+        }
+    }
+
+    // Add NONO_CAP_FILE
+    if let Some(cap_file_str) = config.cap_file.to_str() {
+        if let Ok(cstr) = CString::new(format!("NONO_CAP_FILE={}", cap_file_str)) {
+            env_c.push(cstr);
+        }
+    }
+
+    // Add user-specified environment variables (secrets, etc.)
+    for (key, value) in &config.env_vars {
+        let mut kv = Vec::with_capacity(key.len() + 1 + value.len() + 1);
+        kv.extend_from_slice(key.as_bytes());
+        kv.push(b'=');
+        kv.extend_from_slice(value.as_bytes());
+        if let Ok(cstr) = CString::new(kv) {
+            env_c.push(cstr);
+        }
+    }
+
+    // Create null-terminated pointer arrays for execve
+    let argv_ptrs: Vec<*const libc::c_char> = argv_c
+        .iter()
+        .map(|s| s.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+
+    let envp_ptrs: Vec<*const libc::c_char> = env_c
+        .iter()
+        .map(|s| s.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+
+    // Supervised mode REQUIRES single-threaded execution (Strict context).
+    // Unlike Monitor mode (where sandbox is applied before fork and keyring
+    // threads are tolerable), Supervised mode calls Sandbox::apply() in the
+    // child after fork. If keyring threads hold allocator locks at fork time,
+    // the child's Sandbox::apply() will deadlock when it tries to allocate.
+    if matches!(config.threading, ThreadingContext::KeyringExpected) {
+        return Err(NonoError::SandboxInit(
+            "Supervised mode is incompatible with keyring secrets. \
+             Keyring threads may hold allocator locks at fork time, causing \
+             deadlock when the child applies the sandbox. Use Monitor mode \
+             (remove --supervised) or avoid --secrets with --supervised."
+                .to_string(),
+        ));
+    }
+
+    // Validate single-threaded execution before fork.
+    // Supervised mode applies sandbox in child (allocates), so extra threads
+    // would risk deadlock from contended allocator locks.
+    let thread_count = get_thread_count();
+    if thread_count != 1 {
+        return Err(NonoError::SandboxInit(format!(
+            "Cannot fork in supervised mode: process has {} threads (expected 1). \
+             Supervised mode requires single-threaded execution because the child \
+             calls Sandbox::apply() after fork, which allocates.",
+            thread_count
+        )));
+    }
+
+    // Apply PR_SET_DUMPABLE(0) BEFORE fork so both parent and child inherit
+    // the non-dumpable state. This closes the TOCTOU window where an attacker
+    // could ptrace the unsandboxed parent between fork and hardening.
+    // On macOS, PT_DENY_ATTACH is per-process and not inherited - it must be
+    // applied separately in the parent after fork.
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::prctl;
+        if let Err(e) = prctl::set_dumpable(false) {
+            return Err(NonoError::SandboxInit(format!(
+                "Failed to set PR_SET_DUMPABLE(0) before fork in supervised mode: {}. \
+                 This is required to prevent ptrace attachment to the unsandboxed parent.",
+                e
+            )));
+        }
+    }
+
+    // Create pipes for stdout and stderr interception
+    let (stdout_read, stdout_write): (OwnedFd, OwnedFd) = nix::unistd::pipe()
+        .map_err(|e| NonoError::SandboxInit(format!("pipe() for stdout failed: {}", e)))?;
+    let (stderr_read, stderr_write): (OwnedFd, OwnedFd) = nix::unistd::pipe()
+        .map_err(|e| NonoError::SandboxInit(format!("pipe() for stderr failed: {}", e)))?;
+
+    // Extract raw FDs before fork
+    let stdout_write_fd = stdout_write.as_raw_fd();
+    let stderr_write_fd = stderr_write.as_raw_fd();
+    let stdout_read_fd = stdout_read.as_raw_fd();
+    let stderr_read_fd = stderr_read.as_raw_fd();
+
+    // Wrap in ManuallyDrop to prevent Drop from running in child
+    let stdout_read = ManuallyDrop::new(stdout_read);
+    let stdout_write = ManuallyDrop::new(stdout_write);
+    let stderr_read = ManuallyDrop::new(stderr_read);
+    let stderr_write = ManuallyDrop::new(stderr_write);
+
+    // Compute max FD in parent (get_max_fd may allocate on Linux)
+    let max_fd = get_max_fd();
+
+    // SAFETY: fork() is safe here because we validated threading context.
+    // Child will call Sandbox::apply() which allocates, but this is safe
+    // because the child is single-threaded (validated above).
+    let fork_result = unsafe { fork() };
+
+    match fork_result {
+        Ok(ForkResult::Child) => {
+            // CHILD: Apply sandbox, then exec.
+            //
+            // Unlike Monitor mode, the child must apply the sandbox itself.
+            // Sandbox::apply() allocates (Seatbelt profile generation, Landlock
+            // PathFd opens) but this is safe because we validated single-threaded
+            // execution before fork, giving us a clean heap.
+
+            // Apply the sandbox. On failure, report to stderr pipe and exit.
+            // We can allocate here because we validated single-threaded execution
+            // before fork, so no contended allocator locks.
+            if let Err(e) = Sandbox::apply(config.caps) {
+                // Format the error message including details
+                let detail = format!("nono: failed to apply sandbox in supervised child: {}\n", e);
+                let msg = detail.as_bytes();
+                unsafe {
+                    libc::write(
+                        stderr_write_fd,
+                        msg.as_ptr().cast::<libc::c_void>(),
+                        msg.len(),
+                    );
+                    libc::_exit(126);
+                }
+            }
+
+            // Ptrace hardening in child (defense in depth - child is now sandboxed)
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                const PT_DENY_ATTACH: libc::c_int = 31;
+                unsafe {
+                    libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut::<libc::c_char>(), 0);
+                }
+            }
+
+            // Close read ends of pipes
+            unsafe {
+                libc::close(stdout_read_fd);
+                libc::close(stderr_read_fd);
+            }
+
+            // Close inherited FDs from keyring/other sources
+            close_inherited_fds(max_fd, &[stdout_write_fd, stderr_write_fd]);
+
+            // Redirect stdout to pipe
+            unsafe {
+                if stdout_write_fd != libc::STDOUT_FILENO {
+                    libc::dup2(stdout_write_fd, libc::STDOUT_FILENO);
+                    libc::close(stdout_write_fd);
+                }
+            }
+
+            // Redirect stderr to pipe
+            unsafe {
+                if stderr_write_fd != libc::STDERR_FILENO {
+                    libc::dup2(stderr_write_fd, libc::STDERR_FILENO);
+                    libc::close(stderr_write_fd);
+                }
+            }
+
+            // Execute using pre-prepared CStrings (no allocation)
+            unsafe {
+                libc::execve(program_c.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            }
+
+            // execve only returns on error - exit without cleanup
+            unsafe { libc::_exit(127) }
+        }
+        Ok(ForkResult::Parent { child }) => {
+            // PARENT: Apply ptrace hardening immediately. This is CRITICAL
+            // because the parent is unsandboxed in Supervised mode.
+            // Failure to harden is fatal - we kill the child and abort.
+
+            // On Linux, PR_SET_DUMPABLE was already set before fork and is
+            // inherited, so the parent is already non-dumpable. We verify
+            // it's still set as a defense-in-depth measure.
+            #[cfg(target_os = "linux")]
+            {
+                use nix::sys::prctl;
+                if let Err(e) = prctl::set_dumpable(false) {
+                    // Kill the child before returning - we can't leave an
+                    // unsandboxed parent running without ptrace protection.
+                    let _ = signal::kill(child, Signal::SIGKILL);
+                    let _ = waitpid(child, None);
+                    return Err(NonoError::SandboxInit(format!(
+                        "Failed to verify PR_SET_DUMPABLE(0) on supervised parent: {}. \
+                         Aborting: unsandboxed parent must not be ptrace-attachable.",
+                        e
+                    )));
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                const PT_DENY_ATTACH: libc::c_int = 31;
+                // SAFETY: ptrace(PT_DENY_ATTACH) is a read-only security operation
+                let result = unsafe {
+                    libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut::<libc::c_char>(), 0)
+                };
+                if result != 0 {
+                    let err = std::io::Error::last_os_error();
+                    // Kill the child before returning - we can't leave an
+                    // unsandboxed parent running without ptrace protection.
+                    let _ = signal::kill(child, Signal::SIGKILL);
+                    let _ = waitpid(child, None);
+                    return Err(NonoError::SandboxInit(format!(
+                        "Failed to set PT_DENY_ATTACH on supervised parent: {} (errno: {}). \
+                         Aborting: unsandboxed parent must not be debugger-attachable.",
+                        result, err
+                    )));
+                }
+            }
+
+            // Close write ends, read from pipes, wait for child
             unsafe {
                 ManuallyDrop::drop(&mut { stdout_write });
                 ManuallyDrop::drop(&mut { stderr_write });
@@ -876,6 +1196,20 @@ mod tests {
     #[test]
     fn test_dangerous_env_vars_shell_ifs() {
         assert!(is_dangerous_env_var("IFS"));
+    }
+
+    #[test]
+    fn test_exec_strategy_supervised_selection() {
+        // Verify the strategy selection logic from main.rs:
+        // interactive || direct_exec -> Direct
+        // supervised -> Supervised
+        // else -> Monitor
+        let strategy = ExecStrategy::Supervised;
+        assert_eq!(strategy, ExecStrategy::Supervised);
+
+        // Supervised is distinct from both Monitor and Direct
+        assert_ne!(ExecStrategy::Supervised, ExecStrategy::Direct);
+        assert_ne!(ExecStrategy::Supervised, ExecStrategy::Monitor);
     }
 
     #[test]

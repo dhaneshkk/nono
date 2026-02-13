@@ -48,7 +48,14 @@ fn run() -> Result<()> {
         Commands::Learn(args) => run_learn(*args, cli.silent),
         Commands::Run(args) => {
             output::print_banner(cli.silent);
-            run_sandbox(args.sandbox, args.command, cli.silent)
+            run_sandbox(
+                args.sandbox,
+                args.command,
+                args.no_diagnostics,
+                args.direct_exec,
+                args.supervised,
+                cli.silent,
+            )
         }
         Commands::Shell(args) => {
             output::print_banner(cli.silent);
@@ -223,7 +230,14 @@ fn run_why(args: WhyArgs) -> Result<()> {
 }
 
 /// Run a command inside the sandbox
-fn run_sandbox(args: SandboxArgs, command: Vec<String>, silent: bool) -> Result<()> {
+fn run_sandbox(
+    args: SandboxArgs,
+    command: Vec<String>,
+    no_diagnostics: bool,
+    direct_exec: bool,
+    supervised: bool,
+    silent: bool,
+) -> Result<()> {
     // Check if we have a command to run
     if command.is_empty() {
         return Err(NonoError::NoCommand);
@@ -252,8 +266,13 @@ fn run_sandbox(args: SandboxArgs, command: Vec<String>, silent: bool) -> Result<
         cmd_args,
         &prepared.caps,
         prepared.secrets,
-        prepared.interactive,
-        silent,
+        ExecutionFlags {
+            interactive: prepared.interactive,
+            no_diagnostics,
+            direct_exec,
+            supervised,
+            silent,
+        },
     )
 }
 
@@ -298,9 +317,23 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
         vec![],
         &prepared.caps,
         prepared.secrets,
-        true, // Force interactive for shell
-        silent,
+        ExecutionFlags {
+            interactive: true,
+            no_diagnostics: true,
+            direct_exec: false,
+            supervised: false,
+            silent,
+        },
     )
+}
+
+/// Flags controlling sandboxed execution behavior.
+struct ExecutionFlags {
+    interactive: bool,
+    no_diagnostics: bool,
+    direct_exec: bool,
+    supervised: bool,
+    silent: bool,
 }
 
 fn execute_sandboxed(
@@ -308,8 +341,7 @@ fn execute_sandboxed(
     cmd_args: Vec<OsString>,
     caps: &CapabilitySet,
     loaded_secrets: Vec<nono::LoadedSecret>,
-    interactive: bool,
-    silent: bool,
+    flags: ExecutionFlags,
 ) -> Result<()> {
     // Check if command is blocked using config module
     if let Some(blocked) =
@@ -336,13 +368,8 @@ fn execute_sandboxed(
     let resolved_program = exec_strategy::resolve_program(&command[0])?;
 
     // Write capability state file BEFORE applying sandbox
-    let cap_file = write_capability_state_file(caps, silent);
+    let cap_file = write_capability_state_file(caps, flags.silent);
     let cap_file_path = cap_file.unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
-
-    // Apply the sandbox
-    output::print_applying_sandbox(silent);
-    Sandbox::apply(caps)?;
-    output::print_sandbox_active(silent);
 
     // Validate that secret env var names are not dangerous (e.g. LD_PRELOAD).
     // A malicious profile could map a keystore secret to a linker/interpreter
@@ -356,18 +383,34 @@ fn execute_sandboxed(
         }
     }
 
+    // Determine execution strategy
+    let strategy = if flags.interactive || flags.direct_exec {
+        exec_strategy::ExecStrategy::Direct
+    } else if flags.supervised {
+        exec_strategy::ExecStrategy::Supervised
+    } else {
+        exec_strategy::ExecStrategy::Monitor
+    };
+
+    // Warn user about supervised mode's weaker security posture
+    if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+        output::print_supervised_warning(flags.silent);
+    }
+
+    // Apply sandbox BEFORE fork for Direct and Monitor modes.
+    // Supervised mode applies sandbox in the child AFTER fork so the
+    // parent stays unsandboxed (required for undo snapshots and future IPC).
+    if !matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
+        output::print_applying_sandbox(flags.silent);
+        Sandbox::apply(caps)?;
+        output::print_sandbox_active(flags.silent);
+    }
+
     // Build environment variables for the command
     let env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
         .map(|s| (s.env_var.as_str(), s.value.as_str()))
         .collect();
-
-    // Determine execution strategy
-    let strategy = if interactive {
-        exec_strategy::ExecStrategy::Direct
-    } else {
-        exec_strategy::ExecStrategy::Monitor
-    };
 
     // Determine threading context for fork safety
     let threading = if !loaded_secrets.is_empty() {
@@ -388,7 +431,7 @@ fn execute_sandboxed(
         caps,
         env_vars,
         cap_file: &cap_file_path,
-        no_diagnostics: silent,
+        no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
     };
 
@@ -410,9 +453,17 @@ fn execute_sandboxed(
             drop(loaded_secrets);
             std::process::exit(exit_code);
         }
-        exec_strategy::ExecStrategy::Supervised => Err(NonoError::SandboxInit(
-            "Supervised mode not yet implemented".to_string(),
-        )),
+        exec_strategy::ExecStrategy::Supervised => {
+            output::print_applying_sandbox(flags.silent);
+            let exit_code = exec_strategy::execute_supervised(&config)?;
+            // Clean up capability state file after child exits
+            if cap_file_path.exists() {
+                let _ = std::fs::remove_file(&cap_file_path);
+            }
+            drop(config);
+            drop(loaded_secrets);
+            std::process::exit(exit_code);
+        }
     }
 }
 

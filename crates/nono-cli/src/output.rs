@@ -9,13 +9,16 @@ use std::path::Path;
 
 /// Hedgehog puns for the banner
 const QUOTES: &[&str] = &[
-    "Trust in the hog",
-    "Curled up and secure",
-    "The opposite of yolo",
-    "Prickly about permissions",
-    "No hoggin' resources",
-    "All your base are belong to us",
-    "Rolling with restrictions",
+    "no yolo, just nono",
+    "all your base are not belong to us",
+    "Не положено!",
+    "keep calm and nono on",
+    "不可说的秘密",
+    "no nono no cry!",
+    "नहीं। बस।",
+    "nono, nono, nono, nono - there's a limit",
+    "NONO 危险",
+    "",
 ];
 
 /// Print the nono banner with hedgehog mascot
@@ -119,6 +122,23 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
         eprintln!("    outbound: {}", "allowed".green());
     }
 
+    eprintln!();
+}
+
+/// Print warning about supervised mode's weaker security posture
+pub fn print_supervised_warning(silent: bool) {
+    if silent {
+        return;
+    }
+    eprintln!(
+        "{}",
+        "WARNING: Supervised mode - parent process is NOT sandboxed.".yellow()
+    );
+    eprintln!(
+        "{}",
+        "The parent has broader attack surface than Monitor mode. Use only when required."
+            .truecolor(150, 150, 150)
+    );
     eprintln!();
 }
 

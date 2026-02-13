@@ -227,6 +227,12 @@ pub struct RunArgs {
     #[arg(long = "exec")]
     pub direct_exec: bool,
 
+    /// Use supervised execution mode: fork first, sandbox only the child.
+    /// The parent stays unsandboxed for diagnostics and monitoring.
+    /// Required for features that need an unsandboxed parent (e.g., undo).
+    #[arg(long)]
+    pub supervised: bool,
+
     /// Command to run inside the sandbox
     #[arg(required = true)]
     pub command: Vec<String>,
@@ -417,6 +423,38 @@ mod tests {
             Commands::Run(args) => {
                 assert_eq!(args.sandbox.allow.len(), 2);
                 assert_eq!(args.sandbox.read.len(), 1);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_with_supervised_flag() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--supervised",
+            "--",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(args.supervised);
+                assert_eq!(args.command, vec!["echo", "hello"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_without_supervised_flag() {
+        let cli = Cli::parse_from(["nono", "run", "--allow", ".", "echo", "hello"]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert!(!args.supervised);
             }
             _ => panic!("Expected Run command"),
         }
