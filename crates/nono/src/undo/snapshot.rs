@@ -5,7 +5,7 @@
 //! to a previous state.
 
 use crate::error::{NonoError, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -199,6 +199,66 @@ impl SnapshotManager {
         }
 
         Ok(applied_changes)
+    }
+
+    /// Collect files that match the atomic temp-file pattern used by editors/tools.
+    ///
+    /// These files are typically named `<name>.tmp.<pid>.<timestamp>` and may be
+    /// left behind when interrupted. The undo flow uses this baseline set so we
+    /// can remove only files created during the session.
+    #[must_use]
+    pub fn collect_atomic_temp_files(&self) -> HashSet<PathBuf> {
+        let mut files = HashSet::new();
+
+        for tracked in &self.tracked_paths {
+            if !tracked.exists() {
+                continue;
+            }
+
+            if tracked.is_file() {
+                if has_atomic_temp_suffix(tracked) {
+                    files.insert(tracked.clone());
+                }
+                continue;
+            }
+
+            for entry in WalkDir::new(tracked)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if has_atomic_temp_suffix(path) {
+                    files.insert(path.to_path_buf());
+                }
+            }
+        }
+
+        files
+    }
+
+    /// Remove newly-created atomic temp files after a session completes.
+    ///
+    /// `existing` should come from `collect_atomic_temp_files()` before command
+    /// execution. Files that existed before the session are preserved.
+    pub fn cleanup_new_atomic_temp_files(&self, existing: &HashSet<PathBuf>) -> usize {
+        let mut removed = 0usize;
+
+        for path in self.collect_atomic_temp_files() {
+            if existing.contains(&path) {
+                continue;
+            }
+
+            match fs::remove_file(&path) {
+                Ok(()) => removed = removed.saturating_add(1),
+                Err(e) => tracing::warn!("Failed to remove temp file {}: {}", path.display(), e),
+            }
+        }
+
+        removed
     }
 
     /// Load a manifest from disk by snapshot number.
@@ -498,6 +558,29 @@ fn now_iso8601() -> String {
     format!("{}", duration.as_secs())
 }
 
+/// Match files named like `<name>.tmp.<pid>.<timestamp>`.
+fn has_atomic_temp_suffix(path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+        return false;
+    };
+
+    let Some((base, tail)) = filename.rsplit_once(".tmp.") else {
+        return false;
+    };
+    if base.is_empty() {
+        return false;
+    }
+
+    let Some((pid, ts)) = tail.split_once('.') else {
+        return false;
+    };
+
+    !pid.is_empty()
+        && !ts.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && ts.bytes().all(|b| b.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,5 +787,28 @@ mod tests {
         let loaded: SessionMetadata = serde_json::from_str(&content).expect("parse session.json");
         assert_eq!(loaded.session_id, "test-session");
         assert_eq!(loaded.merkle_roots.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_new_atomic_temp_files_removes_only_new_files() {
+        let (dir, tracked) = setup_test_dir();
+        let session_dir = dir.path().join("session");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let manager = make_manager(&session_dir, &tracked);
+
+        let preexisting = tracked.join("preexisting.txt.tmp.100.200");
+        fs::write(&preexisting, b"old temp").expect("write preexisting temp");
+        let before = manager.collect_atomic_temp_files();
+
+        let new_temp = tracked.join("new.txt.tmp.300.400");
+        fs::write(&new_temp, b"new temp").expect("write new temp");
+        let not_atomic = tracked.join("kept.tmp");
+        fs::write(&not_atomic, b"keep").expect("write non-atomic temp");
+
+        let removed = manager.cleanup_new_atomic_temp_files(&before);
+        assert_eq!(removed, 1);
+        assert!(preexisting.exists());
+        assert!(!new_temp.exists());
+        assert!(not_atomic.exists());
     }
 }

@@ -536,10 +536,17 @@ fn execute_sandboxed(
                 )?;
 
                 let baseline = manager.create_baseline()?;
+                let atomic_temp_before = manager.collect_atomic_temp_files();
 
                 output::print_undo_tracking(&tracked_paths, flags.silent);
 
-                Some((manager, baseline, session_id, session_dir))
+                Some((
+                    manager,
+                    baseline,
+                    session_id,
+                    session_dir,
+                    atomic_temp_before,
+                ))
             } else {
                 None
             };
@@ -549,7 +556,9 @@ fn execute_sandboxed(
             let ended = chrono::Local::now().to_rfc3339();
 
             // Post-exit: take final snapshot and offer restore
-            if let Some((mut manager, baseline, session_id, _session_dir)) = undo_state {
+            if let Some((mut manager, baseline, session_id, _session_dir, atomic_temp_before)) =
+                undo_state
+            {
                 let (final_manifest, changes) = manager.create_incremental(&baseline)?;
 
                 // Collect merkle roots
@@ -578,6 +587,8 @@ fn execute_sandboxed(
                         let _ = undo_ui::review_and_restore(&manager, &baseline, &changes);
                     }
                 }
+
+                let _ = manager.cleanup_new_atomic_temp_files(&atomic_temp_before);
             }
 
             // Clean up capability state file after child exits

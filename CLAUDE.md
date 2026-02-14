@@ -24,6 +24,13 @@ crates/nono/src/                    # Library - pure sandbox primitive
 ├── diagnostic.rs                   # DiagnosticFormatter
 ├── query.rs                        # QueryContext for permission checking
 ├── keystore.rs                     # Secure credential loading from system keystore
+├── undo/
+│   ├── mod.rs                      # Module root, re-exports public API
+│   ├── types.rs                    # ContentHash, FileState, Change, SnapshotManifest, SessionMetadata
+│   ├── object_store.rs             # Content-addressable file storage (SHA-256, dedup, clone_or_copy)
+│   ├── merkle.rs                   # MerkleTree (cryptographic state commitment)
+│   ├── snapshot.rs                 # SnapshotManager (baseline, incremental, restore)
+│   └── exclusion.rs                # ExclusionFilter (gitignore, patterns, globs)
 └── sandbox/
     ├── mod.rs                      # Sandbox facade: apply(), is_supported(), support_info()
     ├── linux.rs                    # Landlock implementation
@@ -40,6 +47,7 @@ crates/nono-cli/src/                # CLI - security policy and UX
 ├── hooks.rs                        # Claude Code hook installation
 ├── setup.rs                        # System setup and verification
 ├── output.rs                       # Banner, dry-run output, prompts
+├── undo_ui.rs                      # Interactive undo review and restore prompts
 ├── learn.rs                        # strace-based path discovery (Linux only)
 ├── config/
 │   ├── mod.rs                      # Config module root
@@ -78,6 +86,7 @@ The library is a **pure sandbox primitive**. It applies ONLY what clients explic
 | `DiagnosticFormatter` | Profile loading and hooks |
 | `QueryContext` | All output and UX |
 | `keystore` | `learn` mode |
+| `undo` module (ObjectStore, SnapshotManager, MerkleTree, ExclusionFilter) | Undo lifecycle, exclusion policy, undo UI |
 
 ## Build & Test
 
