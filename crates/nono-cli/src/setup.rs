@@ -351,11 +351,11 @@ impl SetupRunner {
         println!("  * Created directory: {}", profile_dir.display());
 
         // Generate example profiles
-        self.write_example_profile(&profile_dir, "example-agent.toml", EXAMPLE_AGENT_PROFILE)?;
-        self.write_example_profile(&profile_dir, "offline-build.toml", OFFLINE_BUILD_PROFILE)?;
+        self.write_example_profile(&profile_dir, "example-agent.json", EXAMPLE_AGENT_PROFILE)?;
+        self.write_example_profile(&profile_dir, "offline-build.json", OFFLINE_BUILD_PROFILE)?;
         self.write_example_profile(
             &profile_dir,
-            "data-processing.toml",
+            "data-processing.json",
             DATA_PROCESSING_PROFILE,
         )?;
 
@@ -450,55 +450,52 @@ impl SetupRunner {
 }
 
 // Profile templates
-const EXAMPLE_AGENT_PROFILE: &str = r#"[meta]
-name = "example-agent"
-version = "1.0.0"
-description = "Template for creating custom agent profiles"
-
-[filesystem]
-# Directories with read+write access
-allow = ["$WORKDIR"]
-
-# Directories with read-only access
-read = ["$HOME/.config/my-agent"]
-
-# Directories with write-only access
-write = []
-
-# Individual files
-# allow_file = []
-# read_file = []
-# write_file = []
-
-[network]
-# false = network allowed (default)
-# true = network blocked
-block = false
+const EXAMPLE_AGENT_PROFILE: &str = r#"{
+  "meta": {
+    "name": "example-agent",
+    "version": "1.0.0",
+    "description": "Template for creating custom agent profiles"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR"],
+    "read": ["$HOME/.config/my-agent"],
+    "write": []
+  },
+  "network": {
+    "block": false
+  }
+}
 "#;
 
-const OFFLINE_BUILD_PROFILE: &str = r#"[meta]
-name = "offline-build"
-version = "1.0.0"
-description = "Build environment with no network access"
-
-[filesystem]
-allow = ["$WORKDIR"]
-read = ["$HOME/.cargo", "$HOME/.rustup"]
-
-[network]
-block = true  # No network for reproducible builds
+const OFFLINE_BUILD_PROFILE: &str = r#"{
+  "meta": {
+    "name": "offline-build",
+    "version": "1.0.0",
+    "description": "Build environment with no network access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR"],
+    "read": ["$HOME/.cargo", "$HOME/.rustup"]
+  },
+  "network": {
+    "block": true
+  }
+}
 "#;
 
-const DATA_PROCESSING_PROFILE: &str = r#"[meta]
-name = "data-processing"
-version = "1.0.0"
-description = "Read from input, write to output"
-
-[filesystem]
-read = ["$WORKDIR/input"]
-write = ["$WORKDIR/output"]
-read_file = ["$WORKDIR/config.yaml"]
-
-[network]
-block = false
+const DATA_PROCESSING_PROFILE: &str = r#"{
+  "meta": {
+    "name": "data-processing",
+    "version": "1.0.0",
+    "description": "Read from input, write to output"
+  },
+  "filesystem": {
+    "read": ["$WORKDIR/input"],
+    "write": ["$WORKDIR/output"],
+    "read_file": ["$WORKDIR/config.yaml"]
+  },
+  "network": {
+    "block": false
+  }
+}
 "#;

@@ -109,8 +109,8 @@ fn run_learn(args: LearnArgs, silent: bool) -> Result<()> {
 
     let result = learn::run_learn(&args)?;
 
-    if args.toml {
-        println!("{}", result.to_toml());
+    if args.json {
+        println!("{}", result.to_json());
     } else {
         println!("{}", result.to_summary());
     }
@@ -858,7 +858,10 @@ fn enforce_undo_limits(silent: bool) {
     }
 
     let max_sessions = config.undo.max_sessions;
-    let max_storage_bytes = (config.undo.max_storage_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+    // Clamp to 0.0 to prevent negative/NaN from producing bogus u64 values
+    let storage_bytes_f64 =
+        (config.undo.max_storage_gb.max(0.0) * 1024.0 * 1024.0 * 1024.0).min(u64::MAX as f64);
+    let max_storage_bytes = storage_bytes_f64 as u64;
 
     // Sessions are sorted newest-first. Only prune completed (non-alive) sessions.
     let completed: Vec<&undo_session::SessionInfo> =

@@ -191,10 +191,10 @@ impl Profile {
 /// Load a profile by name
 ///
 /// Loading precedence:
-/// 1. User profiles from ~/.config/nono/profiles/<name>.toml (allows customization)
+/// 1. User profiles from ~/.config/nono/profiles/<name>.json (allows customization)
 /// 2. Built-in profiles (compiled into binary, fallback)
 ///
-/// User profiles require --trust-unsigned unntil signed (planned feature)
+/// User profiles require --trust-unsigned until signed (planned feature)
 pub fn load_profile(name: &str, trust_unsigned: bool) -> Result<Profile> {
     // Validate profile name (alphanumeric + hyphen only)
     if !is_valid_profile_name(name) {
@@ -227,14 +227,14 @@ pub fn load_profile(name: &str, trust_unsigned: bool) -> Result<Profile> {
     Err(NonoError::ProfileNotFound(name.to_string()))
 }
 
-/// Load a profile from a TOML file
+/// Load a profile from a JSON file
 fn load_from_file(path: &Path) -> Result<Profile> {
     let content = fs::read_to_string(path).map_err(|e| NonoError::ProfileRead {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    toml::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))
+    serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))
 }
 
 /// Get the path to a user profile
@@ -247,7 +247,7 @@ fn get_user_profile_path(name: &str) -> Result<PathBuf> {
     Ok(config_dir
         .join("nono")
         .join("profiles")
-        .join(format!("{}.toml", name)))
+        .join(format!("{}.json", name)))
 }
 
 /// Get home directory path using xdg-home
@@ -399,16 +399,15 @@ mod tests {
 
     #[test]
     fn test_secrets_config_parsing() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "secrets": {
+                "openai_api_key": "OPENAI_API_KEY",
+                "anthropic_api_key": "ANTHROPIC_API_KEY"
+            }
+        }"#;
 
-            [secrets]
-            openai_api_key = "OPENAI_API_KEY"
-            anthropic_api_key = "ANTHROPIC_API_KEY"
-        "#;
-
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.secrets.mappings.len(), 2);
         assert_eq!(
             profile.secrets.mappings.get("openai_api_key"),
@@ -422,65 +421,50 @@ mod tests {
 
     #[test]
     fn test_empty_secrets_config() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
-        "#;
+        let json_str = r#"{ "meta": { "name": "test-profile" } }"#;
 
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert!(profile.secrets.mappings.is_empty());
     }
 
     #[test]
     fn test_workdir_config_readwrite() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "workdir": { "access": "readwrite" }
+        }"#;
 
-            [workdir]
-            access = "readwrite"
-        "#;
-
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.workdir.access, WorkdirAccess::ReadWrite);
     }
 
     #[test]
     fn test_workdir_config_read() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "workdir": { "access": "read" }
+        }"#;
 
-            [workdir]
-            access = "read"
-        "#;
-
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.workdir.access, WorkdirAccess::Read);
     }
 
     #[test]
     fn test_workdir_config_none() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
+        let json_str = r#"{
+            "meta": { "name": "test-profile" },
+            "workdir": { "access": "none" }
+        }"#;
 
-            [workdir]
-            access = "none"
-        "#;
-
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.workdir.access, WorkdirAccess::None);
     }
 
     #[test]
     fn test_workdir_config_default() {
-        let toml_str = r#"
-            [meta]
-            name = "test-profile"
-        "#;
+        let json_str = r#"{ "meta": { "name": "test-profile" } }"#;
 
-        let profile: Profile = toml::from_str(toml_str).expect("Failed to parse profile");
+        let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.workdir.access, WorkdirAccess::None);
     }
 }

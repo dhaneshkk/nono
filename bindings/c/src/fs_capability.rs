@@ -4,7 +4,7 @@ use std::os::raw::c_char;
 
 use crate::capability_set::NonoCapabilitySet;
 use crate::rust_string_to_c;
-use crate::types::{access_mode_to_raw, NonoCapabilitySourceTag, NONO_ACCESS_MODE_READ};
+use crate::types::{access_mode_to_raw, NonoCapabilitySourceTag, NONO_ACCESS_MODE_INVALID};
 
 /// Get the number of filesystem capabilities in the set.
 ///
@@ -70,8 +70,9 @@ pub unsafe extern "C" fn nono_capability_set_fs_resolved(
 
 /// Get the access mode of the capability at `index`.
 ///
-/// Returns `NONO_ACCESS_MODE_READ` (0) as default if `caps` is NULL or
-/// `index` is out of bounds. Check `nono_capability_set_fs_count()` first.
+/// Returns `NONO_ACCESS_MODE_INVALID` if `caps` is NULL or `index` is out of
+/// bounds (also sets the last error). Check `nono_capability_set_fs_count()`
+/// first to avoid out-of-bounds access.
 ///
 /// # Safety
 ///
@@ -82,12 +83,16 @@ pub unsafe extern "C" fn nono_capability_set_fs_access(
     index: usize,
 ) -> u32 {
     if caps.is_null() {
-        return NONO_ACCESS_MODE_READ;
+        crate::set_last_error("caps pointer is NULL");
+        return NONO_ACCESS_MODE_INVALID;
     }
     let caps = unsafe { &*caps };
     match caps.inner.fs_capabilities().get(index) {
         Some(cap) => access_mode_to_raw(cap.access),
-        None => NONO_ACCESS_MODE_READ,
+        None => {
+            crate::set_last_error(&format!("index {index} out of bounds"));
+            NONO_ACCESS_MODE_INVALID
+        }
     }
 }
 
@@ -115,8 +120,9 @@ pub unsafe extern "C" fn nono_capability_set_fs_is_file(
 
 /// Get the source tag of the capability at `index`.
 ///
-/// Returns `NonoCapabilitySourceTag::User` as default if `caps` is NULL
-/// or `index` is out of bounds.
+/// Returns `NonoCapabilitySourceTag::User` and sets the last error if `caps`
+/// is NULL or `index` is out of bounds. Check `nono_capability_set_fs_count()`
+/// first to avoid out-of-bounds access.
 ///
 /// # Safety
 ///
@@ -127,6 +133,7 @@ pub unsafe extern "C" fn nono_capability_set_fs_source_tag(
     index: usize,
 ) -> NonoCapabilitySourceTag {
     if caps.is_null() {
+        crate::set_last_error("caps pointer is NULL");
         return NonoCapabilitySourceTag::User;
     }
     let caps = unsafe { &*caps };
@@ -137,7 +144,10 @@ pub unsafe extern "C" fn nono_capability_set_fs_source_tag(
             nono::CapabilitySource::Group(_) => NonoCapabilitySourceTag::Group,
             nono::CapabilitySource::System => NonoCapabilitySourceTag::System,
         },
-        None => NonoCapabilitySourceTag::User,
+        None => {
+            crate::set_last_error(&format!("index {index} out of bounds"));
+            NonoCapabilitySourceTag::User
+        }
     }
 }
 
@@ -243,6 +253,10 @@ mod tests {
         unsafe {
             assert!(nono_capability_set_fs_original(caps, 99).is_null());
             assert!(nono_capability_set_fs_resolved(caps, 99).is_null());
+            assert_eq!(
+                nono_capability_set_fs_access(caps, 99),
+                crate::types::NONO_ACCESS_MODE_INVALID,
+            );
             assert!(nono_capability_set_fs_source_group_name(caps, 99).is_null());
             nono_capability_set_free(caps);
         }

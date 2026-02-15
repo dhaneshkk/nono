@@ -604,15 +604,15 @@ impl CapabilitySet {
             }
         }
 
+        if lines.is_empty() {
+            lines.push("(no capabilities granted)".to_string());
+        }
+
         lines.push("Network:".to_string());
         if self.net_block {
             lines.push("  outbound: blocked".to_string());
         } else {
             lines.push("  outbound: allowed".to_string());
-        }
-
-        if lines.is_empty() {
-            lines.push("(no capabilities granted)".to_string());
         }
 
         lines.join("\n")

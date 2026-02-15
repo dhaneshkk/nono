@@ -1,8 +1,7 @@
 //! Group-based policy resolver
 //!
 //! Parses `policy.json` and resolves named groups into `CapabilitySet` entries
-//! and platform-specific rules. This replaces the flat `security-lists.toml` approach
-//! with composable, platform-aware groups.
+//! and platform-specific rules using composable, platform-aware groups.
 
 use crate::profile;
 use nono::{AccessMode, CapabilitySet, CapabilitySource, FsCapability, NonoError, Result};
@@ -526,7 +525,7 @@ pub fn validate_deny_overlaps(deny_paths: &[PathBuf], caps: &CapabilitySet) {
 }
 
 /// Get the list of all group names defined in the policy
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn list_groups(policy: &Policy) -> Vec<&str> {
     let mut names: Vec<&str> = policy.groups.keys().map(|s| s.as_str()).collect();
     names.sort();
@@ -534,7 +533,7 @@ pub fn list_groups(policy: &Policy) -> Vec<&str> {
 }
 
 /// Get group description by name
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn group_description<'a>(policy: &'a Policy, name: &str) -> Option<&'a str> {
     policy.groups.get(name).map(|g| g.description.as_str())
 }
@@ -593,7 +592,7 @@ pub fn get_dangerous_commands(policy: &Policy) -> HashSet<String> {
 /// Collects `allow.read` entries from all platform-matching groups. Paths are
 /// returned unexpanded (with `~` and `$TMPDIR` intact) for caller to expand.
 /// Used by learn mode (Linux only).
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
 pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     let mut result = Vec::new();
 
@@ -614,10 +613,9 @@ pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
 /// Reads from the embedded policy.json `base_groups` array. This is the base
 /// set of groups that both `from_args()` (non-profile CLI) and built-in
 /// profiles use. Profiles extend this with additional groups.
-pub fn base_groups() -> Vec<String> {
-    // The embedded policy must be valid at build time; a corrupted binary is fatal.
-    let policy = load_embedded_policy().expect("embedded policy.json must be valid");
-    policy.base_groups
+pub fn base_groups() -> Result<Vec<String>> {
+    let policy = load_embedded_policy()?;
+    Ok(policy.base_groups)
 }
 
 /// Get a built-in profile from embedded policy.json.

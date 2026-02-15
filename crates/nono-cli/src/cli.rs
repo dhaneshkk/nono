@@ -33,8 +33,8 @@ pub enum Commands {
     # With an existing profile to see what's missing
     nono learn --profile my-profile -- my-app
 
-    # Output as TOML for profile
-    nono learn --toml -- node server.js
+    # Output as JSON for profile
+    nono learn --json -- node server.js
 
     # Limit trace duration
     nono learn --timeout 30 -- my-app
@@ -372,9 +372,9 @@ pub struct LearnArgs {
     #[arg(long, short = 'p', value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Output discovered paths as TOML fragment for profile
+    /// Output discovered paths as JSON fragment for profile
     #[arg(long)]
-    pub toml: bool,
+    pub json: bool,
 
     /// Timeout in seconds (default: run until command exits)
     #[arg(long, value_name = "SECS")]

@@ -52,7 +52,7 @@ impl CapabilitySetExt for CapabilitySet {
 
         // Resolve base policy groups (system paths, deny rules, dangerous commands)
         let loaded_policy = policy::load_embedded_policy()?;
-        let base = policy::base_groups();
+        let base = policy::base_groups()?;
         let resolved = policy::resolve_groups(&loaded_policy, &base, &mut caps)?;
 
         // Directory permissions (canonicalize handles existence check atomically)
@@ -137,7 +137,7 @@ impl CapabilitySetExt for CapabilitySet {
         // All profiles must have groups; if empty, use base_groups() as fallback
         let loaded_policy = policy::load_embedded_policy()?;
         let groups = if profile.security.groups.is_empty() {
-            policy::base_groups()
+            policy::base_groups()?
         } else {
             profile.security.groups.clone()
         };

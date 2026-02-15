@@ -25,6 +25,11 @@
 #define NONO_ACCESS_MODE_READ_WRITE 2
 
 /**
+ * Sentinel value returned on error (NULL pointer, out-of-bounds index).
+ */
+#define NONO_ACCESS_MODE_INVALID UINT32_MAX
+
+/**
  * Tag for capability source discriminant.
  */
 typedef enum NonoCapabilitySourceTag {
@@ -415,8 +420,9 @@ char *nono_capability_set_fs_resolved(const struct NonoCapabilitySet *caps, uint
 /**
  * Get the access mode of the capability at `index`.
  *
- * Returns `NONO_ACCESS_MODE_READ` (0) as default if `caps` is NULL or
- * `index` is out of bounds. Check `nono_capability_set_fs_count()` first.
+ * Returns `NONO_ACCESS_MODE_INVALID` if `caps` is NULL or `index` is out of
+ * bounds (also sets the last error). Check `nono_capability_set_fs_count()`
+ * first to avoid out-of-bounds access.
  *
  * # Safety
  *
@@ -438,8 +444,9 @@ bool nono_capability_set_fs_is_file(const struct NonoCapabilitySet *caps, uintpt
 /**
  * Get the source tag of the capability at `index`.
  *
- * Returns `NonoCapabilitySourceTag::User` as default if `caps` is NULL
- * or `index` is out of bounds.
+ * Returns `NonoCapabilitySourceTag::User` and sets the last error if `caps`
+ * is NULL or `index` is out of bounds. Check `nono_capability_set_fs_count()`
+ * first to avoid out-of-bounds access.
  *
  * # Safety
  *
@@ -466,8 +473,8 @@ char *nono_capability_set_fs_source_group_name(const struct NonoCapabilitySet *c
 /**
  * Create a query context from a capability set.
  *
- * The capability set is cloned internally. The returned pointer is never
- * NULL. Caller must free with `nono_query_context_free()`.
+ * The capability set is cloned internally.
+ * Caller must free with `nono_query_context_free()`.
  *
  * # Safety
  *
@@ -575,7 +582,8 @@ void nono_sandbox_state_free(struct NonoSandboxState *state);
  * Serialize the state to a JSON string.
  *
  * Caller must free the returned string with `nono_string_free()`.
- * Returns NULL if `state` is NULL.
+ * Returns NULL if `state` is NULL or serialization fails
+ * (call `nono_last_error()` for details).
  *
  * # Safety
  *

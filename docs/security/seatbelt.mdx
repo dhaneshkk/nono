@@ -51,7 +51,7 @@ A nono-generated Seatbelt profile follows this structure:
 ; Executable mapping (required for dyld)
 (allow file-map-executable)
 
-; System paths from security-lists.toml
+; System paths from policy.json groups
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/lib"))
 (allow file-read* (subpath "/private/var/db/dyld"))
@@ -89,7 +89,7 @@ This approach:
 
 ## System Paths
 
-nono allows read access to system paths required for running executables. These are loaded from `security-lists.toml`:
+nono allows read access to system paths required for running executables. These are defined in `policy.json` groups (`system_read_macos`, `system_read_linux`):
 
 | Category | Paths | Purpose |
 |----------|-------|---------|

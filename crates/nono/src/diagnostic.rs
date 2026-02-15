@@ -104,7 +104,6 @@ impl<'a> DiagnosticFormatter<'a> {
     ///
     /// Useful for logging or brief status messages.
     #[must_use]
-    #[allow(dead_code)]
     pub fn format_summary(&self) -> String {
         let path_count = self.caps.fs_capabilities().len();
         let network_status = if self.caps.is_network_blocked() {

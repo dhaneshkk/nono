@@ -77,7 +77,7 @@ impl SnapshotManager {
 
         let manifest = SnapshotManifest {
             number: 0,
-            timestamp: now_iso8601(),
+            timestamp: now_epoch_secs(),
             parent: None,
             files,
             merkle_root: *merkle.root(),
@@ -104,7 +104,7 @@ impl SnapshotManager {
         let number = previous.number.saturating_add(1);
         let manifest = SnapshotManifest {
             number,
-            timestamp: now_iso8601(),
+            timestamp: now_epoch_secs(),
             parent: Some(previous.number),
             files: current_files,
             merkle_root: *merkle.root(),
@@ -680,9 +680,8 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     })
 }
 
-/// Get the current time as an ISO 8601 string.
-fn now_iso8601() -> String {
-    // Use a simple format without chrono dependency in library
+/// Get the current time as Unix epoch seconds.
+fn now_epoch_secs() -> String {
     use std::time::SystemTime;
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

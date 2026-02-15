@@ -84,9 +84,10 @@ impl SandboxState {
     }
 
     /// Serialize state to JSON
-    #[must_use]
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+    pub fn to_json(&self) -> crate::error::Result<String> {
+        serde_json::to_string_pretty(self).map_err(|e| {
+            crate::error::NonoError::ConfigParse(format!("Failed to serialize sandbox state: {e}"))
+        })
     }
 
     /// Deserialize state from JSON
@@ -107,8 +108,8 @@ mod tests {
         assert!(state.net_blocked);
         assert!(state.fs.is_empty());
 
-        let json = state.to_json();
-        let restored = SandboxState::from_json(&json).unwrap();
+        let json = state.to_json().expect("serialize state");
+        let restored = SandboxState::from_json(&json).expect("deserialize state");
         assert!(restored.net_blocked);
     }
 

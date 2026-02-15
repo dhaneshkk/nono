@@ -14,6 +14,8 @@ use std::os::raw::c_char;
 pub const NONO_ACCESS_MODE_READ: u32 = 0;
 pub const NONO_ACCESS_MODE_WRITE: u32 = 1;
 pub const NONO_ACCESS_MODE_READ_WRITE: u32 = 2;
+/// Sentinel value returned on error (NULL pointer, out-of-bounds index).
+pub const NONO_ACCESS_MODE_INVALID: u32 = u32::MAX;
 
 /// Validate a raw access mode value from C and convert to `nono::AccessMode`.
 ///

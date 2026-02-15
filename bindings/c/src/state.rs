@@ -58,7 +58,8 @@ pub unsafe extern "C" fn nono_sandbox_state_free(state: *mut NonoSandboxState) {
 /// Serialize the state to a JSON string.
 ///
 /// Caller must free the returned string with `nono_string_free()`.
-/// Returns NULL if `state` is NULL.
+/// Returns NULL if `state` is NULL or serialization fails
+/// (call `nono_last_error()` for details).
 ///
 /// # Safety
 ///
@@ -69,7 +70,13 @@ pub unsafe extern "C" fn nono_sandbox_state_to_json(state: *const NonoSandboxSta
         return std::ptr::null_mut();
     }
     let state = unsafe { &*state };
-    rust_string_to_c(state.inner.to_json())
+    match state.inner.to_json() {
+        Ok(json) => rust_string_to_c(json),
+        Err(e) => {
+            set_last_error(&e.to_string());
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Deserialize state from a JSON string.

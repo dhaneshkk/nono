@@ -11,7 +11,6 @@ pub fn get_builtin(name: &str) -> Option<Profile> {
 }
 
 /// List all built-in profile names
-#[allow(dead_code)]
 pub fn list_builtin() -> Vec<String> {
     crate::policy::list_policy_profiles().unwrap_or_default()
 }
@@ -68,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_base_groups_from_policy() {
-        let groups = crate::policy::base_groups();
+        let groups = crate::policy::base_groups().expect("load base groups");
         assert!(!groups.is_empty());
         assert!(groups.contains(&"deny_credentials".to_string()));
         assert!(groups.contains(&"system_read_macos".to_string()));
@@ -103,7 +102,7 @@ mod tests {
         // doesn't have groups it shouldn't (trust_groups is empty for all
         // current profiles, but the merging path is exercised)
         let profile = get_builtin("openclaw").expect("Profile not found");
-        let base = crate::policy::base_groups();
+        let base = crate::policy::base_groups().expect("load base groups");
         // All base groups should be present since trust_groups is empty
         for group in &base {
             assert!(

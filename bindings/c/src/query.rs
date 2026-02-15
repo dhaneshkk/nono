@@ -71,8 +71,8 @@ fn query_result_to_c(result: &nono::query::QueryResult) -> NonoQueryResult {
 
 /// Create a query context from a capability set.
 ///
-/// The capability set is cloned internally. The returned pointer is never
-/// NULL. Caller must free with `nono_query_context_free()`.
+/// The capability set is cloned internally.
+/// Caller must free with `nono_query_context_free()`.
 ///
 /// # Safety
 ///

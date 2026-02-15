@@ -65,6 +65,10 @@ pub(crate) fn set_last_error(msg: &str) {
 }
 
 /// Map a `NonoError` to an error code and store the message.
+///
+/// Every `NonoError` variant is matched explicitly so the compiler will flag
+/// new variants that need a mapping, instead of silently falling through to
+/// `ErrUnknown`.
 pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
     use types::NonoErrorCode;
     set_last_error(&e.to_string());
@@ -73,14 +77,42 @@ pub(crate) fn map_error(e: &nono::NonoError) -> types::NonoErrorCode {
         nono::NonoError::ExpectedDirectory(_) => NonoErrorCode::ErrExpectedDirectory,
         nono::NonoError::ExpectedFile(_) => NonoErrorCode::ErrExpectedFile,
         nono::NonoError::PathCanonicalization { .. } => NonoErrorCode::ErrPathCanonicalization,
-        nono::NonoError::NoCapabilities => NonoErrorCode::ErrNoCapabilities,
+        nono::NonoError::NoCapabilities | nono::NonoError::NoCommand => {
+            NonoErrorCode::ErrNoCapabilities
+        }
+        nono::NonoError::CwdPromptRequired => NonoErrorCode::ErrInvalidArg,
         nono::NonoError::SandboxInit(_) => NonoErrorCode::ErrSandboxInit,
         nono::NonoError::UnsupportedPlatform(_) => NonoErrorCode::ErrUnsupportedPlatform,
         nono::NonoError::BlockedCommand { .. } => NonoErrorCode::ErrBlockedCommand,
-        nono::NonoError::ConfigParse(_) => NonoErrorCode::ErrConfigParse,
-        nono::NonoError::ProfileParse(_) => NonoErrorCode::ErrProfileParse,
+        #[cfg(target_os = "linux")]
+        nono::NonoError::Landlock(_) | nono::NonoError::LandlockPath(_) => {
+            NonoErrorCode::ErrSandboxInit
+        }
+        nono::NonoError::KeystoreAccess(_) | nono::NonoError::SecretNotFound(_) => {
+            NonoErrorCode::ErrIo
+        }
+        nono::NonoError::ConfigParse(_)
+        | nono::NonoError::ConfigWrite { .. }
+        | nono::NonoError::ConfigRead { .. } => NonoErrorCode::ErrConfigParse,
+        nono::NonoError::ProfileNotFound(_)
+        | nono::NonoError::ProfileRead { .. }
+        | nono::NonoError::ProfileParse(_)
+        | nono::NonoError::UnsignedProfile(_) => NonoErrorCode::ErrProfileParse,
+        nono::NonoError::HomeNotFound
+        | nono::NonoError::Setup(_)
+        | nono::NonoError::LearnError(_)
+        | nono::NonoError::HookInstall(_) => NonoErrorCode::ErrConfigParse,
+        nono::NonoError::EnvVarValidation { .. } => NonoErrorCode::ErrInvalidArg,
+        nono::NonoError::CapFileValidation { .. } | nono::NonoError::CapFileTooLarge { .. } => {
+            NonoErrorCode::ErrInvalidArg
+        }
+        nono::NonoError::SignatureInvalid { .. } => NonoErrorCode::ErrConfigParse,
+        nono::NonoError::VersionDowngrade { .. } => NonoErrorCode::ErrConfigParse,
         nono::NonoError::Io(_) | nono::NonoError::CommandExecution(_) => NonoErrorCode::ErrIo,
-        _ => NonoErrorCode::ErrUnknown,
+        nono::NonoError::ObjectStore(_)
+        | nono::NonoError::Snapshot(_)
+        | nono::NonoError::HashMismatch { .. }
+        | nono::NonoError::SessionNotFound(_) => NonoErrorCode::ErrIo,
     }
 }
 

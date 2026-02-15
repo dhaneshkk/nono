@@ -57,42 +57,33 @@ impl LearnResult {
             || !self.readwrite_paths.is_empty()
     }
 
-    /// Format as TOML fragment for profile
-    pub fn to_toml(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("[filesystem]".to_string());
+    /// Format as JSON fragment for profile
+    pub fn to_json(&self) -> String {
+        let allow: Vec<String> = self
+            .readwrite_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let read: Vec<String> = self
+            .read_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let write: Vec<String> = self
+            .write_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
 
-        if !self.readwrite_paths.is_empty() {
-            lines.push("allow = [".to_string());
-            for path in &self.readwrite_paths {
-                lines.push(format!("    \"{}\",", path.display()));
+        let fragment = serde_json::json!({
+            "filesystem": {
+                "allow": allow,
+                "read": read,
+                "write": write
             }
-            lines.push("]".to_string());
-        } else {
-            lines.push("allow = []".to_string());
-        }
+        });
 
-        if !self.read_paths.is_empty() {
-            lines.push("read = [".to_string());
-            for path in &self.read_paths {
-                lines.push(format!("    \"{}\",", path.display()));
-            }
-            lines.push("]".to_string());
-        } else {
-            lines.push("read = []".to_string());
-        }
-
-        if !self.write_paths.is_empty() {
-            lines.push("write = [".to_string());
-            for path in &self.write_paths {
-                lines.push(format!("    \"{}\",", path.display()));
-            }
-            lines.push("]".to_string());
-        } else {
-            lines.push("write = []".to_string());
-        }
-
-        lines.join("\n")
+        serde_json::to_string_pretty(&fragment).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Format as human-readable summary
@@ -664,15 +655,15 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_result_to_toml() {
+    fn test_learn_result_to_json() {
         let mut result = LearnResult::new();
         result.read_paths.insert(PathBuf::from("/some/read/path"));
         result.write_paths.insert(PathBuf::from("/some/write/path"));
 
-        let toml = result.to_toml();
-        assert!(toml.contains("[filesystem]"));
-        assert!(toml.contains("/some/read/path"));
-        assert!(toml.contains("/some/write/path"));
+        let json = result.to_json();
+        assert!(json.contains("filesystem"));
+        assert!(json.contains("/some/read/path"));
+        assert!(json.contains("/some/write/path"));
     }
 
     #[test]
