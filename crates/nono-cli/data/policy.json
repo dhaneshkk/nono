@@ -3,6 +3,18 @@
     "version": 3,
     "schema_version": "3.0"
   },
+  "never_grant": [
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/passwd",
+    "/boot",
+    "/boot/grub",
+    "/System/Library/LaunchDaemons",
+    "/System/Library/LaunchAgents",
+    "/Library/LaunchDaemons",
+    "/Library/LaunchAgents",
+    "~/.ssh/authorized_keys"
+  ],
   "base_groups": [
     "deny_credentials",
     "deny_keychains_macos",

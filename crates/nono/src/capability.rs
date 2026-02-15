@@ -360,6 +360,11 @@ pub struct CapabilitySet {
     /// Raw platform-specific rules injected verbatim into the sandbox profile.
     /// On macOS these are Seatbelt S-expression strings; ignored on Linux.
     platform_rules: Vec<String>,
+    /// Enable sandbox extension support for runtime capability expansion.
+    /// On macOS, adds extension filter rules to the Seatbelt profile so that
+    /// `sandbox_extension_consume()` tokens can expand the sandbox dynamically.
+    /// On Linux, this flag is informational (seccomp-notify is installed separately).
+    extensions_enabled: bool,
 }
 
 impl CapabilitySet {
@@ -397,6 +402,20 @@ impl CapabilitySet {
     #[must_use]
     pub fn block_network(mut self) -> Self {
         self.net_block = true;
+        self
+    }
+
+    /// Enable sandbox extensions for runtime capability expansion (builder pattern)
+    ///
+    /// On macOS, this adds extension filter rules to the Seatbelt profile so that
+    /// `sandbox_extension_consume()` tokens can dynamically expand access. The rules
+    /// are inert until a matching token is consumed -- they add no access by themselves.
+    ///
+    /// On Linux, this flag is informational only; seccomp-notify is installed
+    /// separately in the child process.
+    #[must_use]
+    pub fn enable_extensions(mut self) -> Self {
+        self.extensions_enabled = true;
         self
     }
 
@@ -443,6 +462,11 @@ impl CapabilitySet {
         self.net_block = blocked;
     }
 
+    /// Set sandbox extensions state
+    pub fn set_extensions_enabled(&mut self, enabled: bool) {
+        self.extensions_enabled = enabled;
+    }
+
     /// Add to allowed commands list
     pub fn add_allowed_command(&mut self, cmd: impl Into<String>) {
         self.allowed_commands.push(cmd.into());
@@ -475,6 +499,12 @@ impl CapabilitySet {
     #[must_use]
     pub fn is_network_blocked(&self) -> bool {
         self.net_block
+    }
+
+    /// Check if sandbox extensions are enabled for runtime capability expansion
+    #[must_use]
+    pub fn extensions_enabled(&self) -> bool {
+        self.extensions_enabled
     }
 
     /// Get allowed commands
@@ -520,13 +550,15 @@ impl CapabilitySet {
         let mut to_remove = Vec::new();
         // Deferred updates: (target_index, new_original) to apply after iteration
         let mut original_updates: Vec<(usize, PathBuf)> = Vec::new();
+        // Deferred access upgrades: (target_index, new_access) for Read+Write merges
+        let mut access_upgrades: Vec<(usize, AccessMode)> = Vec::new();
 
         for (i, cap) in self.fs.iter().enumerate() {
             let key = (cap.resolved.clone(), cap.is_file);
             if let Some(&existing_idx) = seen.get(&key) {
                 let existing = &self.fs[existing_idx];
 
-                // Determine which entry to keep.
+                // Determine which entry to keep and whether to merge access modes.
                 // User-intent entries (User/Profile) always win over
                 // system/group entries regardless of access level.
                 let new_is_user = cap.source.is_user_intent();
@@ -543,6 +575,15 @@ impl CapabilitySet {
                     cap.access == AccessMode::ReadWrite && existing.access != AccessMode::ReadWrite
                 };
 
+                // Merge complementary access modes (Read + Write = ReadWrite).
+                // When two entries from the same source category have different
+                // non-ReadWrite modes, upgrade the kept entry to ReadWrite.
+                let merged_access = match (existing.access, cap.access) {
+                    (AccessMode::Read, AccessMode::Write)
+                    | (AccessMode::Write, AccessMode::Read) => Some(AccessMode::ReadWrite),
+                    _ => None,
+                };
+
                 if keep_new {
                     to_remove.push(existing_idx);
                     seen.insert(key, i);
@@ -550,12 +591,20 @@ impl CapabilitySet {
                     if cap.original == cap.resolved && existing.original != existing.resolved {
                         original_updates.push((i, existing.original.clone()));
                     }
+                    // Apply merged access to the new (kept) entry
+                    if let Some(access) = merged_access {
+                        access_upgrades.push((i, access));
+                    }
                 } else {
                     // Inherit symlink original from the entry being discarded
                     if existing.original == existing.resolved && cap.original != cap.resolved {
                         original_updates.push((existing_idx, cap.original.clone()));
                     }
                     to_remove.push(i);
+                    // Apply merged access to the existing (kept) entry
+                    if let Some(access) = merged_access {
+                        access_upgrades.push((existing_idx, access));
+                    }
                 }
             } else {
                 seen.insert(key, i);
@@ -565,6 +614,11 @@ impl CapabilitySet {
         // Apply deferred symlink original updates
         for (idx, original) in original_updates {
             self.fs[idx].original = original;
+        }
+
+        // Apply deferred access upgrades (Read + Write -> ReadWrite)
+        for (idx, access) in access_upgrades {
+            self.fs[idx].access = access;
         }
 
         // Remove duplicates in reverse order to maintain indices
@@ -763,6 +817,61 @@ mod tests {
     }
 
     #[test]
+    fn test_deduplicate_merges_read_and_write_to_readwrite() {
+        // Two system/group entries for the same path with Read and Write
+        // should merge to ReadWrite (e.g., /dev from system_read + system_write).
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Write,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        assert_eq!(surviving.access, AccessMode::ReadWrite);
+    }
+
+    #[test]
+    fn test_deduplicate_merges_write_then_read_to_readwrite() {
+        // Same merge but with Write added first, Read second.
+        let path = PathBuf::from("/some/path");
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Write,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+        caps.add_fs(FsCapability {
+            original: path.clone(),
+            resolved: path.clone(),
+            access: AccessMode::Read,
+            is_file: false,
+            source: CapabilitySource::System,
+        });
+
+        caps.deduplicate();
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        let surviving = &caps.fs_capabilities()[0];
+        assert_eq!(surviving.access, AccessMode::ReadWrite);
+    }
+
+    #[test]
     fn test_deduplicate_preserves_symlink_original() {
         // User adds --read /tmp (original: /tmp, resolved: /private/tmp, Read)
         // System adds /private/tmp (original: /private/tmp, resolved: /private/tmp, ReadWrite)
@@ -841,6 +950,27 @@ mod tests {
         let cap = FsCapability::new_dir(&symlink, AccessMode::Read).unwrap();
         // Symlink should be resolved to real path
         assert_eq!(cap.resolved, real_dir.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_extensions_flag() {
+        let caps = CapabilitySet::new();
+        assert!(!caps.extensions_enabled());
+
+        let caps = caps.enable_extensions();
+        assert!(caps.extensions_enabled());
+    }
+
+    #[test]
+    fn test_extensions_flag_mutable() {
+        let mut caps = CapabilitySet::new();
+        assert!(!caps.extensions_enabled());
+
+        caps.set_extensions_enabled(true);
+        assert!(caps.extensions_enabled());
+
+        caps.set_extensions_enabled(false);
+        assert!(!caps.extensions_enabled());
     }
 
     #[test]

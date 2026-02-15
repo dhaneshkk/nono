@@ -52,12 +52,16 @@ pub mod keystore;
 pub mod query;
 pub mod sandbox;
 pub mod state;
+pub mod supervisor;
 pub mod undo;
 
 // Re-exports for convenience
 pub use capability::{AccessMode, CapabilitySet, CapabilitySource, FsCapability};
-pub use diagnostic::DiagnosticFormatter;
+pub use diagnostic::{DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode};
 pub use error::{NonoError, Result};
 pub use keystore::{load_secrets, LoadedSecret};
 pub use sandbox::{Sandbox, SupportInfo};
 pub use state::SandboxState;
+pub use supervisor::{
+    ApprovalBackend, ApprovalDecision, CapabilityRequest, NeverGrantChecker, SupervisorSocket,
+};

@@ -9,8 +9,6 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
-use crate::config;
-#[cfg(target_os = "linux")]
 use crate::profile::{self, Profile};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;

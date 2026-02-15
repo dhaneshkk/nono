@@ -19,6 +19,10 @@ use tracing::{debug, warn};
 pub struct Policy {
     #[allow(dead_code)]
     pub meta: PolicyMeta,
+    /// Paths that can never be granted via supervisor IPC, regardless of user approval.
+    /// Consumed by `NeverGrantChecker` during supervisor orchestration.
+    #[serde(default)]
+    pub never_grant: Vec<String>,
     /// Default groups applied to all sandbox invocations
     #[serde(default)]
     pub base_groups: Vec<String>,

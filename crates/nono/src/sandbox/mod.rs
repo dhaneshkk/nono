@@ -14,6 +14,17 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+// Re-export macOS extension functions for supervisor use
+#[cfg(target_os = "macos")]
+pub use macos::{extension_consume, extension_issue_file, extension_release};
+
+// Re-export Linux seccomp-notify primitives for supervisor use
+#[cfg(target_os = "linux")]
+pub use linux::{
+    deny_notif, inject_fd, install_seccomp_notify, notif_id_valid, read_notif_path, recv_notif,
+    SeccompData, SeccompNotif,
+};
+
 /// Information about sandbox support on this platform
 #[derive(Debug, Clone)]
 pub struct SupportInfo {

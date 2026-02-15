@@ -1,0 +1,115 @@
+//! Supervisor IPC types for capability expansion
+//!
+//! These types define the protocol between a sandboxed child process and its
+//! unsandboxed supervisor parent. The child sends [`CapabilityRequest`]s over
+//! a Unix socket, and the supervisor responds with [`ApprovalDecision`]s.
+
+use crate::capability::AccessMode;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::time::SystemTime;
+
+/// A request from the sandboxed child for additional filesystem access.
+///
+/// Sent over the supervisor Unix socket when the child needs access to a path
+/// not covered by its initial sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityRequest {
+    /// Unique identifier for this request (for replay protection and audit)
+    pub request_id: String,
+    /// The filesystem path being requested
+    pub path: PathBuf,
+    /// The access mode requested (read, write, or read+write)
+    pub access: AccessMode,
+    /// Human-readable reason for the request (provided by the agent)
+    pub reason: Option<String>,
+    /// PID of the requesting child process
+    pub child_pid: u32,
+    /// Session identifier for correlating requests within a single run
+    pub session_id: String,
+}
+
+/// The supervisor's response to a [`CapabilityRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApprovalDecision {
+    /// Access was granted. The supervisor will pass an fd via `SCM_RIGHTS`.
+    Granted,
+    /// Access was denied with a reason.
+    Denied {
+        /// Why the request was denied
+        reason: String,
+    },
+    /// The approval request timed out without a decision.
+    Timeout,
+}
+
+impl ApprovalDecision {
+    /// Returns true if access was granted.
+    #[must_use]
+    pub fn is_granted(&self) -> bool {
+        matches!(self, ApprovalDecision::Granted)
+    }
+
+    /// Returns true if access was denied.
+    #[must_use]
+    pub fn is_denied(&self) -> bool {
+        matches!(self, ApprovalDecision::Denied { .. })
+    }
+}
+
+/// A structured audit record for every approval decision.
+///
+/// Every capability request produces an audit entry regardless of outcome.
+/// These entries support fleet-level monitoring and compliance reporting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// When the decision was made
+    pub timestamp: SystemTime,
+    /// The original request
+    pub request: CapabilityRequest,
+    /// The decision that was reached
+    pub decision: ApprovalDecision,
+    /// Which approval backend handled the request
+    pub backend: String,
+    /// How long the decision took (milliseconds)
+    pub duration_ms: u64,
+}
+
+/// IPC message envelope sent from child to supervisor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SupervisorMessage {
+    /// A capability expansion request (explicit, from SDK clients)
+    Request(CapabilityRequest),
+    /// A request from the DYLD shim on macOS when an interposed file operation
+    /// encounters EPERM. The shim sends only the path and access mode -- no PID
+    /// (the supervisor uses the fork PID and validates via peer_pid).
+    ShimRequest {
+        /// The filesystem path that was denied
+        path: PathBuf,
+        /// The access mode the operation needed
+        access: AccessMode,
+    },
+}
+
+/// IPC message envelope sent from supervisor to child.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SupervisorResponse {
+    /// Response to a capability request
+    Decision {
+        /// The request_id this responds to
+        request_id: String,
+        /// The approval decision
+        decision: ApprovalDecision,
+    },
+    /// A sandbox extension token for macOS capability expansion.
+    /// The shim consumes this token via sandbox_extension_consume()
+    /// to dynamically expand the sandbox for the given path.
+    ExtensionToken {
+        /// The HMAC-authenticated extension token string
+        token: String,
+        /// The path this token grants access to
+        path: PathBuf,
+        /// The access mode granted (Read -> read token, Write/ReadWrite -> read-write token)
+        access: AccessMode,
+    },
+}

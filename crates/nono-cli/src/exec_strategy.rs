@@ -14,10 +14,16 @@ use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, ForkResult, Pid};
-use nono::{CapabilitySet, DiagnosticFormatter, NonoError, Result, Sandbox};
+use nono::supervisor::{ApprovalDecision, SupervisorMessage, SupervisorResponse};
+use nono::{
+    ApprovalBackend, CapabilitySet, DenialReason, DenialRecord, DiagnosticFormatter,
+    DiagnosticMode, NeverGrantChecker, NonoError, Result, Sandbox, SupervisorSocket,
+};
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Write};
 use std::mem::ManuallyDrop;
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -159,6 +165,20 @@ pub struct ExecConfig<'a> {
     pub no_diagnostics: bool,
     /// Threading context for fork safety validation.
     pub threading: ThreadingContext,
+}
+
+/// Configuration for supervisor IPC in supervised execution mode.
+///
+/// When provided to [`execute_supervised()`], the supervisor creates a Unix
+/// socket pair before fork, passes the child end to the child process via
+/// the `NONO_SUPERVISOR_FD` environment variable, and runs an IPC event loop
+/// in the parent that handles capability expansion requests from the
+/// sandboxed child.
+pub struct SupervisorConfig<'a> {
+    /// Checker for permanently blocked paths (from policy.json `never_grant`)
+    pub never_grant: &'a NeverGrantChecker,
+    /// Backend for approval decisions (terminal prompt, webhook, policy engine)
+    pub approval_backend: &'a dyn ApprovalBackend,
 }
 
 /// Execute a command using the Direct strategy (exec, nono disappears).
@@ -500,17 +520,19 @@ pub fn execute_monitor(config: &ExecConfig<'_>) -> Result<i32> {
 /// 1. Prepare all data for exec in parent (CString conversion)
 /// 2. Reject keyring threading context (deadlock risk)
 /// 3. Verify single-threaded execution
-/// 4. Apply PR_SET_DUMPABLE(0) before fork (Linux - inherited, closes TOCTOU)
-/// 5. Fork into parent and child
-/// 6. Child: apply sandbox, apply ptrace hardening, close inherited FDs, exec
-/// 7. Parent: apply PT_DENY_ATTACH (macOS, fatal on failure), wait for child
+/// 4. Fork into parent and child
+/// 5. Child: apply Landlock, install seccomp-notify, close inherited FDs, exec
+/// 6. Parent: apply PR_SET_DUMPABLE(0) + PT_DENY_ATTACH, receive seccomp fd, run supervisor loop
 ///
 /// Unlike Monitor mode, Supervised mode does NOT pipe stdout/stderr. The child
 /// inherits the parent's terminal directly, preserving TTY semantics for
 /// interactive programs (e.g., Claude Code, vim). Diagnostic injection is not
 /// needed because the parent is alive after the child exits and can print
 /// diagnostics and undo UI directly.
-pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
+pub fn execute_supervised(
+    config: &ExecConfig<'_>,
+    supervisor: Option<&SupervisorConfig<'_>>,
+) -> Result<i32> {
     let program = &config.command[0];
     let cmd_args = &config.command[1..];
 
@@ -532,6 +554,15 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
         })?);
     }
 
+    // Create supervisor socket pair if IPC is enabled.
+    // Must be done before building envp so we can add NONO_SUPERVISOR_FD.
+    let socket_pair = if supervisor.is_some() {
+        Some(SupervisorSocket::pair()?)
+    } else {
+        None
+    };
+    let child_sock_fd: Option<i32> = socket_pair.as_ref().map(|(_, c)| c.as_raw_fd());
+
     // Build environment: inherit current env + add our vars
     let mut env_c: Vec<CString> = Vec::new();
 
@@ -540,6 +571,7 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
         if let (Some(k), Some(v)) = (key.to_str(), value.to_str()) {
             let should_skip = config.env_vars.iter().any(|(ek, _)| *ek == k)
                 || k == "NONO_CAP_FILE"
+                || k == "NONO_SUPERVISOR_FD"
                 || is_dangerous_env_var(k);
             if !should_skip {
                 if let Ok(cstr) = CString::new(format!("{}={}", k, v)) {
@@ -563,6 +595,13 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
         kv.push(b'=');
         kv.extend_from_slice(value.as_bytes());
         if let Ok(cstr) = CString::new(kv) {
+            env_c.push(cstr);
+        }
+    }
+
+    // Add NONO_SUPERVISOR_FD if supervisor IPC is enabled
+    if let Some(fd) = child_sock_fd {
+        if let Ok(cstr) = CString::new(format!("NONO_SUPERVISOR_FD={fd}")) {
             env_c.push(cstr);
         }
     }
@@ -608,22 +647,16 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
         )));
     }
 
-    // Apply PR_SET_DUMPABLE(0) BEFORE fork so both parent and child inherit
-    // the non-dumpable state. This closes the TOCTOU window where an attacker
-    // could ptrace the unsandboxed parent between fork and hardening.
-    // On macOS, PT_DENY_ATTACH is per-process and not inherited - it must be
-    // applied separately in the parent after fork.
-    #[cfg(target_os = "linux")]
-    {
-        use nix::sys::prctl;
-        if let Err(e) = prctl::set_dumpable(false) {
-            return Err(NonoError::SandboxInit(format!(
-                "Failed to set PR_SET_DUMPABLE(0) before fork in supervised mode: {}. \
-                 This is required to prevent ptrace attachment to the unsandboxed parent.",
-                e
-            )));
-        }
-    }
+    // NOTE: In supervised mode, we do NOT set PR_SET_DUMPABLE(0) before fork.
+    // The child must remain dumpable so the parent can read /proc/CHILD/mem
+    // for seccomp-notify path extraction. The child is already sandboxed by
+    // Landlock + seccomp, so being dumpable adds minimal risk.
+    // The parent sets itself non-dumpable immediately after fork (below).
+
+    // Compute child's FD keep list: supervisor socket fd if IPC is enabled
+    let child_keep_fds: Vec<i32> = child_sock_fd.into_iter().collect();
+
+    let effective_caps: &CapabilitySet = config.caps;
 
     // Compute max FD in parent (get_max_fd may allocate on Linux)
     let max_fd = get_max_fd();
@@ -646,8 +679,11 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
             // (no pipe redirection). This preserves TTY semantics for
             // interactive programs like Claude Code.
 
-            // Apply the sandbox. On failure, report to stderr and exit.
-            if let Err(e) = Sandbox::apply(config.caps) {
+            // Apply Landlock FIRST. Landlock's restrict_self() opens path fds
+            // for rule creation, so it must run before seccomp-notify is installed.
+            // (seccomp-notify traps ALL openat/openat2 syscalls, which would
+            // intercept Landlock's own path opens and deadlock.)
+            if let Err(e) = Sandbox::apply(effective_caps) {
                 let detail = format!("nono: failed to apply sandbox in supervised child: {}\n", e);
                 let msg = detail.as_bytes();
                 unsafe {
@@ -660,11 +696,58 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
                 }
             }
 
-            // Ptrace hardening in child (defense in depth - child is now sandboxed)
+            // On Linux with supervisor enabled: install seccomp-notify filter
+            // AFTER Landlock. The kernel evaluates seccomp before LSM hooks
+            // regardless of installation order, so the security properties are
+            // identical. All openat/openat2 from exec'd child are routed to
+            // the supervisor, which can inject fds for approved paths.
             #[cfg(target_os = "linux")]
-            unsafe {
-                libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+            {
+                if let Some(fd) = child_sock_fd {
+                    match nono::sandbox::install_seccomp_notify() {
+                        Ok(notify_fd) => {
+                            // Send the notify fd to the parent via SCM_RIGHTS
+                            // SAFETY: We own the child socket end and the notify fd
+                            // is valid. from_stream is safe with our inherited fd.
+                            let child_sock =
+                                unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                            let tmp_sock = SupervisorSocket::from_stream(child_sock);
+                            if let Err(_e) = tmp_sock.send_fd(notify_fd.as_raw_fd()) {
+                                let msg = b"nono: failed to send seccomp notify fd to supervisor\n";
+                                unsafe {
+                                    libc::write(
+                                        libc::STDERR_FILENO,
+                                        msg.as_ptr().cast::<libc::c_void>(),
+                                        msg.len(),
+                                    );
+                                }
+                            }
+                            // Leak the socket wrapper so it doesn't close the fd
+                            // (the fd is still needed for supervisor IPC)
+                            std::mem::forget(tmp_sock);
+                        }
+                        Err(e) => {
+                            // seccomp not available -- proceed without transparent expansion
+                            let detail = format!(
+                                "nono: seccomp-notify not available, expansion disabled: {}\n",
+                                e
+                            );
+                            let msg = detail.as_bytes();
+                            unsafe {
+                                libc::write(
+                                    libc::STDERR_FILENO,
+                                    msg.as_ptr().cast::<libc::c_void>(),
+                                    msg.len(),
+                                );
+                            }
+                        }
+                    }
+                }
             }
+
+            // In supervised mode, the child stays dumpable so the parent can
+            // read /proc/CHILD/mem for seccomp-notify path extraction. The child
+            // is already sandboxed by Landlock + seccomp (defense in depth).
 
             #[cfg(target_os = "macos")]
             {
@@ -674,8 +757,8 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
                 }
             }
 
-            // Close inherited FDs (but NOT stdin/stdout/stderr which are inherited)
-            close_inherited_fds(max_fd, &[]);
+            // Close inherited FDs (but keep stdin/stdout/stderr and supervisor socket)
+            close_inherited_fds(max_fd, &child_keep_fds);
 
             // Execute using pre-prepared CStrings (no allocation)
             unsafe {
@@ -686,13 +769,21 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
             unsafe { libc::_exit(127) }
         }
         Ok(ForkResult::Parent { child }) => {
+            // Destructure socket pair: close child's end, keep supervisor's end
+            let supervisor_sock = if let Some((sup, child_end)) = socket_pair {
+                drop(child_end);
+                Some(sup)
+            } else {
+                None
+            };
+
             // PARENT: Apply ptrace hardening immediately. This is CRITICAL
             // because the parent is unsandboxed in Supervised mode.
             // Failure to harden is fatal - we kill the child and abort.
 
-            // On Linux, PR_SET_DUMPABLE was already set before fork and is
-            // inherited, so the parent is already non-dumpable. We verify
-            // it's still set as a defense-in-depth measure.
+            // On Linux, set PR_SET_DUMPABLE(0) on the parent to prevent
+            // ptrace attachment. The child stays dumpable so the parent
+            // can read /proc/CHILD/mem for seccomp-notify path extraction.
             #[cfg(target_os = "linux")]
             {
                 use nix::sys::prctl;
@@ -725,25 +816,98 @@ pub fn execute_supervised(config: &ExecConfig<'_>) -> Result<i32> {
                 }
             }
 
-            // Set up signal forwarding and wait for child.
+            // On Linux with supervisor enabled: receive the seccomp notify fd
+            // from the child. The child installed a seccomp-notify filter and
+            // sent the fd via SCM_RIGHTS on the supervisor socket.
+            #[cfg(target_os = "linux")]
+            let seccomp_notify_fd: Option<OwnedFd> = if supervisor.is_some() {
+                if let Some(ref sup_sock) = supervisor_sock {
+                    match sup_sock.recv_fd() {
+                        Ok(fd) => {
+                            debug!("Received seccomp notify fd from child");
+                            Some(fd)
+                        }
+                        Err(e) => {
+                            warn!("Failed to receive seccomp notify fd: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Set up signal forwarding.
             // No output piping needed - child inherits the terminal directly.
             setup_signal_forwarding(child);
-            let status = wait_for_child(child)?;
 
-            match status {
+            // Build initial-set path lookup for seccomp fast-path (Linux)
+            #[cfg(target_os = "linux")]
+            let initial_paths: std::collections::HashSet<std::path::PathBuf> = {
+                let mut set = std::collections::HashSet::new();
+                for cap in config.caps.fs_capabilities() {
+                    set.insert(cap.resolved.clone());
+                }
+                set
+            };
+
+            // Run IPC event loop if supervisor is configured, otherwise just wait
+            let (status, denials) =
+                if let (Some(sup_cfg), Some(mut sup_sock)) = (supervisor, supervisor_sock) {
+                    #[cfg(target_os = "linux")]
+                    {
+                        run_supervisor_loop(
+                            child,
+                            &mut sup_sock,
+                            sup_cfg,
+                            seccomp_notify_fd.as_ref(),
+                            &initial_paths,
+                        )?
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        run_supervisor_loop(child, &mut sup_sock, sup_cfg)?
+                    }
+                } else {
+                    let status = wait_for_child(child)?;
+                    (status, Vec::new())
+                };
+
+            let exit_code = match status {
                 WaitStatus::Exited(_, code) => {
                     debug!("Supervised child exited with code {}", code);
-                    Ok(code)
+                    code
                 }
                 WaitStatus::Signaled(_, sig, _) => {
                     debug!("Supervised child killed by signal {}", sig);
-                    Ok(128 + sig as i32)
+                    128 + sig as i32
                 }
                 other => {
                     warn!("Unexpected wait status: {:?}", other);
-                    Ok(1)
+                    1
                 }
+            };
+
+            // Print diagnostic footer on non-zero exit.
+            // Unlike Monitor mode (which intercepts stderr for inline injection),
+            // Supervised mode inherits the terminal directly, so the footer is
+            // only printed here after the child exits.
+            if exit_code != 0 && !config.no_diagnostics {
+                let mode = if supervisor.is_some() {
+                    DiagnosticMode::Supervised
+                } else {
+                    DiagnosticMode::Standard
+                };
+                let formatter = DiagnosticFormatter::new(config.caps)
+                    .with_mode(mode)
+                    .with_denials(&denials);
+                let footer = formatter.format_footer(exit_code);
+                eprintln!("\n{}", footer);
             }
+
+            Ok(exit_code)
         }
         Err(e) => Err(NonoError::SandboxInit(format!("fork() failed: {}", e))),
     }
@@ -1093,6 +1257,754 @@ fn get_thread_count() -> usize {
     }
 }
 
+/// Supervisor IPC event loop for capability expansion (macOS).
+///
+/// Polls the supervisor socket for ShimRequest messages from the DYLD shim.
+/// Uses `poll(2)` with a 200ms timeout to periodically check child status.
+/// Returns the child's wait status and any denial records collected.
+#[cfg(not(target_os = "linux"))]
+fn run_supervisor_loop(
+    child: Pid,
+    sock: &mut SupervisorSocket,
+    config: &SupervisorConfig<'_>,
+) -> Result<(WaitStatus, Vec<DenialRecord>)> {
+    let sock_fd = sock.as_raw_fd();
+    let mut rate_limiter = RateLimiter::new(10, 5);
+    let mut denials = Vec::new();
+
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: sock_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        // SAFETY: pfd is a valid pollfd struct on the stack, nfds=1 is correct.
+        let ret = unsafe { libc::poll(&mut pfd, 1, 200) };
+
+        if ret > 0 {
+            if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                debug!("Supervisor socket closed by child");
+                break;
+            }
+            if pfd.revents & libc::POLLIN != 0 {
+                match sock.recv_message() {
+                    Ok(msg) => {
+                        if let Err(e) = handle_supervisor_message(
+                            sock,
+                            msg,
+                            config,
+                            &mut rate_limiter,
+                            &mut denials,
+                        ) {
+                            warn!("Error handling supervisor message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Error receiving supervisor message: {}", e);
+                        break;
+                    }
+                }
+            }
+        } else if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                warn!("poll() error in supervisor loop: {}", err);
+                break;
+            }
+        }
+
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => continue,
+            Ok(status) => return Ok((status, denials)),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(nix::errno::Errno::ECHILD) => {
+                warn!("Child already reaped in supervisor loop");
+                return Ok((WaitStatus::Exited(child, 1), denials));
+            }
+            Err(e) => {
+                return Err(NonoError::SandboxInit(format!(
+                    "waitpid() failed in supervisor loop: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    let status = wait_for_child(child)?;
+    Ok((status, denials))
+}
+
+/// Supervisor IPC event loop for capability expansion (Linux).
+///
+/// Multiplexes between:
+/// - seccomp notify fd (openat/openat2 interceptions from the child)
+/// - supervisor socket (explicit capability requests from SDK clients)
+/// - child process exit via non-blocking `waitpid()`
+///
+/// Seccomp notifications for paths in the initial capability set are handled
+/// immediately (fast-path via HashSet lookup). Other paths go through the
+/// approval backend.
+/// Returns the child's wait status and any denial records collected.
+#[cfg(target_os = "linux")]
+fn run_supervisor_loop(
+    child: Pid,
+    sock: &mut SupervisorSocket,
+    config: &SupervisorConfig<'_>,
+    seccomp_fd: Option<&OwnedFd>,
+    initial_paths: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<(WaitStatus, Vec<DenialRecord>)> {
+    let sock_fd = sock.as_raw_fd();
+    let notify_raw_fd = seccomp_fd.map(|fd| fd.as_raw_fd());
+    let mut rate_limiter = RateLimiter::new(10, 5);
+    let mut denials = Vec::new();
+    // Track whether the supervisor socket is still alive. After exec,
+    // CLOEXEC closes the child's socket end, causing POLLHUP. We stop
+    // polling the dead socket but continue handling seccomp notifications.
+    let mut sock_fd_active = true;
+
+    loop {
+        // Build poll array: supervisor socket (if alive) + seccomp fd (if present)
+        let mut pfds: Vec<libc::pollfd> = vec![libc::pollfd {
+            // poll ignores negative fds, so set to -1 when socket is dead
+            fd: if sock_fd_active { sock_fd } else { -1 },
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(nfd) = notify_raw_fd {
+            pfds.push(libc::pollfd {
+                fd: nfd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+
+        // SAFETY: pfds is a valid array of pollfd structs on the stack.
+        let ret = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 200) };
+
+        if ret > 0 {
+            // Check supervisor socket (only if still active)
+            if sock_fd_active && pfds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                // Supervisor socket closed (CLOEXEC closes child's end after exec).
+                // If we have a seccomp notify fd, keep looping to handle
+                // seccomp notifications -- just stop polling the dead socket.
+                if notify_raw_fd.is_some() {
+                    debug!("Supervisor socket closed, continuing for seccomp notifications");
+                    sock_fd_active = false;
+                } else {
+                    debug!("Supervisor socket closed by child");
+                    break;
+                }
+            }
+            if sock_fd_active && pfds[0].revents & libc::POLLIN != 0 {
+                match sock.recv_message() {
+                    Ok(msg) => {
+                        if let Err(e) = handle_supervisor_message(
+                            sock,
+                            msg,
+                            config,
+                            &mut rate_limiter,
+                            &mut denials,
+                        ) {
+                            warn!("Error handling supervisor message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Error receiving supervisor message: {}", e);
+                        if notify_raw_fd.is_none() {
+                            break;
+                        }
+                        sock_fd_active = false;
+                    }
+                }
+            }
+
+            // Check seccomp notify fd (if present)
+            if pfds.len() > 1 && pfds[1].revents & libc::POLLIN != 0 {
+                if let Some(nfd) = notify_raw_fd {
+                    if let Err(e) = handle_seccomp_notification(
+                        nfd,
+                        child,
+                        config,
+                        initial_paths,
+                        &mut rate_limiter,
+                        &mut denials,
+                    ) {
+                        debug!("Error handling seccomp notification: {}", e);
+                    }
+                }
+            }
+        } else if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                warn!("poll() error in supervisor loop: {}", err);
+                break;
+            }
+        }
+
+        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => continue,
+            Ok(status) => return Ok((status, denials)),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(nix::errno::Errno::ECHILD) => {
+                warn!("Child already reaped in supervisor loop");
+                return Ok((WaitStatus::Exited(child, 1), denials));
+            }
+            Err(e) => {
+                return Err(NonoError::SandboxInit(format!(
+                    "waitpid() failed in supervisor loop: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    let status = wait_for_child(child)?;
+    Ok((status, denials))
+}
+
+/// Handle a seccomp notification on Linux.
+///
+/// Flow:
+/// 1. Receive notification (blocking recv from kernel)
+/// 2. Read path from child's /proc/PID/mem
+/// 3. TOCTOU check: verify notification still valid
+/// 4. Check never_grant -> deny (BEFORE initial-set fast-path)
+/// 5. Fast-path: if path is in initial set, open + inject fd immediately
+/// 6. Rate limit check -> deny if exceeded
+/// 7. Delegate to approval backend
+/// 8. Second TOCTOU check before inject/deny
+/// 9. If approved: open path + inject fd. If denied: deny notification.
+#[cfg(target_os = "linux")]
+fn handle_seccomp_notification(
+    notify_fd: std::os::fd::RawFd,
+    child: Pid,
+    config: &SupervisorConfig<'_>,
+    initial_paths: &std::collections::HashSet<std::path::PathBuf>,
+    rate_limiter: &mut RateLimiter,
+    denials: &mut Vec<DenialRecord>,
+) -> Result<()> {
+    use nono::sandbox::{deny_notif, inject_fd, notif_id_valid, read_notif_path, recv_notif};
+
+    // 1. Receive the notification
+    let notif = recv_notif(notify_fd)?;
+
+    // 2. Read the path from the child's memory (args[1] = pathname for openat)
+    let path = match read_notif_path(notif.pid, notif.data.args[1]) {
+        Ok(p) => p,
+        Err(e) => {
+            debug!("Failed to read path from seccomp notification: {}", e);
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    };
+
+    // 3. First TOCTOU check: verify notification still valid
+    if !notif_id_valid(notify_fd, notif.id)? {
+        debug!("Seccomp notification expired (first TOCTOU check)");
+        return Ok(());
+    }
+
+    // Determine access mode from open flags (args[2] = flags for openat)
+    let flags = notif.data.args[2] as i32;
+    let access = match flags & libc::O_ACCMODE {
+        libc::O_RDONLY => nono::AccessMode::Read,
+        libc::O_WRONLY => nono::AccessMode::Write,
+        _ => nono::AccessMode::ReadWrite, // O_RDWR
+    };
+
+    let canonicalized = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+    // 4. Check never_grant BEFORE initial-set fast-path.
+    // never_grant is a hard security boundary: paths like /etc/shadow must be
+    // denied even if they fall under an allowed directory (/etc). Checking
+    // never_grant first ensures policy enforcement regardless of initial set.
+    let never_grant_check = config.never_grant.check(&canonicalized);
+    if !never_grant_check.is_blocked() {
+        // Also check the original (non-canonicalized) path for symlink aliases
+        let never_grant_original = config.never_grant.check(&path);
+        if never_grant_original.is_blocked() {
+            debug!(
+                "Seccomp: path {} (via {}) blocked by never_grant",
+                canonicalized.display(),
+                path.display()
+            );
+            denials.push(DenialRecord {
+                path: path.clone(),
+                access,
+                reason: DenialReason::PolicyBlocked,
+            });
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    } else {
+        debug!(
+            "Seccomp: path {} blocked by never_grant",
+            canonicalized.display()
+        );
+        denials.push(DenialRecord {
+            path: canonicalized.clone(),
+            access,
+            reason: DenialReason::PolicyBlocked,
+        });
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
+    // 5. Fast-path: check if path is in the initial capability set.
+    // The canonical path may match directly or be a subpath of an initial-set entry.
+    // This runs after never_grant to ensure policy-blocked paths are always denied.
+    let in_initial_set = initial_paths.iter().any(|p| canonicalized.starts_with(p));
+
+    if in_initial_set {
+        // Path is in the initial set -- open and inject immediately (no prompt)
+        match open_path_for_access(&canonicalized, &access) {
+            Ok(file) => {
+                // Second TOCTOU check before inject
+                if notif_id_valid(notify_fd, notif.id)? {
+                    inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
+                }
+            }
+            Err(e) => {
+                debug!("Failed to open initial-set path {}: {}", path.display(), e);
+                let _ = deny_notif(notify_fd, notif.id);
+            }
+        }
+        return Ok(());
+    }
+
+    // 6. Rate limit check
+    if !rate_limiter.try_acquire() {
+        debug!("Rate limited seccomp notification for {}", path.display());
+        denials.push(DenialRecord {
+            path: path.clone(),
+            access,
+            reason: DenialReason::RateLimited,
+        });
+        let _ = deny_notif(notify_fd, notif.id);
+        return Ok(());
+    }
+
+    // 7. Delegate to approval backend
+    let request = nono::supervisor::CapabilityRequest {
+        request_id: format!("seccomp-{}", uuid_v4_simple()),
+        path: path.clone(),
+        access,
+        reason: Some("Sandbox intercepted file operation (seccomp-notify)".to_string()),
+        child_pid: child.as_raw() as u32,
+        session_id: String::new(),
+    };
+
+    let decision = match config.approval_backend.request_capability(&request) {
+        Ok(d) => {
+            if d.is_denied() {
+                denials.push(DenialRecord {
+                    path: path.clone(),
+                    access,
+                    reason: DenialReason::UserDenied,
+                });
+            }
+            d
+        }
+        Err(e) => {
+            warn!("Approval backend error for seccomp notification: {}", e);
+            denials.push(DenialRecord {
+                path: path.clone(),
+                access,
+                reason: DenialReason::BackendError,
+            });
+            let _ = deny_notif(notify_fd, notif.id);
+            return Ok(());
+        }
+    };
+
+    // 8. Second TOCTOU check before acting on the decision
+    if !notif_id_valid(notify_fd, notif.id)? {
+        debug!("Seccomp notification expired (second TOCTOU check)");
+        return Ok(());
+    }
+
+    // 9. Act on the decision
+    if decision.is_granted() {
+        match open_path_for_access(&path, &access) {
+            Ok(file) => {
+                inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
+            }
+            Err(e) => {
+                warn!("Failed to open approved path {}: {}", path.display(), e);
+                let _ = deny_notif(notify_fd, notif.id);
+            }
+        }
+    } else {
+        let _ = deny_notif(notify_fd, notif.id);
+    }
+
+    Ok(())
+}
+
+/// Handle a single supervisor IPC message.
+///
+/// Flow:
+/// 1. Check `never_grant` - permanently blocked paths are rejected immediately
+/// 2. Delegate to `ApprovalBackend` for the decision
+/// 3. If granted, open the path and send the fd via `SCM_RIGHTS`
+/// 4. Send the decision response
+/// 5. Record denials for diagnostic footer
+fn handle_supervisor_message(
+    sock: &mut SupervisorSocket,
+    msg: SupervisorMessage,
+    config: &SupervisorConfig<'_>,
+    rate_limiter: &mut RateLimiter,
+    denials: &mut Vec<DenialRecord>,
+) -> Result<()> {
+    match msg {
+        SupervisorMessage::Request(request) => {
+            // 1. Check never_grant list first (before consulting the backend)
+            let never_grant_check = config.never_grant.check(&request.path);
+
+            let decision = if never_grant_check.is_blocked() {
+                debug!(
+                    "Supervisor: path {} blocked by never_grant",
+                    request.path.display()
+                );
+                denials.push(DenialRecord {
+                    path: request.path.clone(),
+                    access: request.access,
+                    reason: DenialReason::PolicyBlocked,
+                });
+                ApprovalDecision::Denied {
+                    reason: format!(
+                        "Path is permanently blocked by never_grant policy: {}",
+                        request.path.display()
+                    ),
+                }
+            } else {
+                // 2. Delegate to approval backend
+                match config.approval_backend.request_capability(&request) {
+                    Ok(d) => {
+                        if d.is_denied() {
+                            denials.push(DenialRecord {
+                                path: request.path.clone(),
+                                access: request.access,
+                                reason: DenialReason::UserDenied,
+                            });
+                        }
+                        d
+                    }
+                    Err(e) => {
+                        warn!("Approval backend error: {}", e);
+                        denials.push(DenialRecord {
+                            path: request.path.clone(),
+                            access: request.access,
+                            reason: DenialReason::BackendError,
+                        });
+                        ApprovalDecision::Denied {
+                            reason: format!("Approval backend error: {e}"),
+                        }
+                    }
+                }
+            };
+
+            // 3. If granted, open the path and send fd before the response
+            if decision.is_granted() {
+                match open_path_for_access(&request.path, &request.access) {
+                    Ok(file) => {
+                        if let Err(e) = sock.send_fd(file.as_raw_fd()) {
+                            warn!("Failed to send fd: {}", e);
+                            let response = SupervisorResponse::Decision {
+                                request_id: request.request_id,
+                                decision: ApprovalDecision::Denied {
+                                    reason: format!("Failed to send file descriptor: {e}"),
+                                },
+                            };
+                            return sock.send_response(&response);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to open path: {}", e);
+                        let response = SupervisorResponse::Decision {
+                            request_id: request.request_id,
+                            decision: ApprovalDecision::Denied {
+                                reason: format!("Supervisor failed to open path: {e}"),
+                            },
+                        };
+                        return sock.send_response(&response);
+                    }
+                }
+            }
+
+            // 4. Send decision response
+            let response = SupervisorResponse::Decision {
+                request_id: request.request_id,
+                decision,
+            };
+            sock.send_response(&response)?;
+        }
+        SupervisorMessage::ShimRequest { path, access } => {
+            // Rate limit shim requests to prevent prompt flooding
+            if !rate_limiter.try_acquire() {
+                debug!("Rate limited shim request for {}", path.display());
+                denials.push(DenialRecord {
+                    path: path.clone(),
+                    access,
+                    reason: DenialReason::RateLimited,
+                });
+                let response = SupervisorResponse::Decision {
+                    request_id: String::new(),
+                    decision: ApprovalDecision::Denied {
+                        reason: "Rate limited: too many expansion requests".to_string(),
+                    },
+                };
+                return sock.send_response(&response);
+            }
+
+            // macOS DYLD shim request: the shim intercepted an EPERM on a file
+            // operation and is asking the supervisor to issue an extension token.
+            // The shim does NOT send a PID -- the supervisor uses the known child
+            // PID from fork() and validates via peer_pid().
+            handle_shim_request(sock, &path, &access, config, denials)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a request from the macOS DYLD shim for sandbox extension expansion.
+///
+/// Flow:
+/// 1. Check `never_grant` - permanently blocked paths are rejected immediately
+/// 2. Delegate to `ApprovalBackend` for the decision
+/// 3. If granted on macOS, issue an extension token and send it to the shim
+/// 4. If denied, send a Decision::Denied response and record the denial
+#[cfg(target_os = "macos")]
+fn handle_shim_request(
+    sock: &mut SupervisorSocket,
+    path: &std::path::Path,
+    access: &nono::AccessMode,
+    config: &SupervisorConfig<'_>,
+    denials: &mut Vec<DenialRecord>,
+) -> Result<()> {
+    use nono::supervisor::CapabilityRequest;
+
+    // 1. Check never_grant
+    let never_grant_check = config.never_grant.check(path);
+    if never_grant_check.is_blocked() {
+        debug!(
+            "Supervisor: shim request for {} blocked by never_grant",
+            path.display()
+        );
+        denials.push(DenialRecord {
+            path: path.to_path_buf(),
+            access: *access,
+            reason: DenialReason::PolicyBlocked,
+        });
+        let response = SupervisorResponse::Decision {
+            request_id: String::new(),
+            decision: ApprovalDecision::Denied {
+                reason: format!(
+                    "Path is permanently blocked by never_grant policy: {}",
+                    path.display()
+                ),
+            },
+        };
+        return sock.send_response(&response);
+    }
+
+    // 2. Construct a CapabilityRequest for the approval backend
+    let request = CapabilityRequest {
+        request_id: format!("shim-{}", uuid_v4_simple()),
+        path: path.to_path_buf(),
+        access: *access,
+        reason: Some("Sandbox denied file operation (DYLD shim interception)".to_string()),
+        child_pid: 0, // Filled by caller if needed; peer_pid() validates
+        session_id: String::new(),
+    };
+
+    let decision = match config.approval_backend.request_capability(&request) {
+        Ok(d) => {
+            if d.is_denied() {
+                denials.push(DenialRecord {
+                    path: path.to_path_buf(),
+                    access: *access,
+                    reason: DenialReason::UserDenied,
+                });
+            }
+            d
+        }
+        Err(e) => {
+            warn!("Approval backend error for shim request: {}", e);
+            denials.push(DenialRecord {
+                path: path.to_path_buf(),
+                access: *access,
+                reason: DenialReason::BackendError,
+            });
+            ApprovalDecision::Denied {
+                reason: format!("Approval backend error: {e}"),
+            }
+        }
+    };
+
+    // 3. If granted, issue extension token
+    if decision.is_granted() {
+        match nono::sandbox::extension_issue_file(path, *access) {
+            Ok(token) => {
+                let response = SupervisorResponse::ExtensionToken {
+                    token,
+                    path: path.to_path_buf(),
+                    access: *access,
+                };
+                return sock.send_response(&response);
+            }
+            Err(e) => {
+                warn!("Failed to issue extension token: {}", e);
+                let response = SupervisorResponse::Decision {
+                    request_id: request.request_id,
+                    decision: ApprovalDecision::Denied {
+                        reason: format!("Failed to issue extension token: {e}"),
+                    },
+                };
+                return sock.send_response(&response);
+            }
+        }
+    }
+
+    // 4. Denied
+    let response = SupervisorResponse::Decision {
+        request_id: request.request_id,
+        decision,
+    };
+    sock.send_response(&response)
+}
+
+/// Handle a request from the macOS DYLD shim (Linux stub).
+/// On Linux, shim requests are not used (seccomp-notify handles expansion).
+#[cfg(not(target_os = "macos"))]
+fn handle_shim_request(
+    sock: &mut SupervisorSocket,
+    path: &std::path::Path,
+    _access: &nono::AccessMode,
+    _config: &SupervisorConfig<'_>,
+    _denials: &mut Vec<DenialRecord>,
+) -> Result<()> {
+    warn!(
+        "Received ShimRequest on non-macOS platform for {}",
+        path.display()
+    );
+    let response = SupervisorResponse::Decision {
+        request_id: String::new(),
+        decision: ApprovalDecision::Denied {
+            reason: "ShimRequest is only supported on macOS".to_string(),
+        },
+    };
+    sock.send_response(&response)
+}
+
+/// Generate a simple unique ID for shim requests.
+fn uuid_v4_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}", nanos)
+}
+
+/// Open a filesystem path with the requested access mode.
+///
+/// Used by the supervisor to open files on behalf of the sandboxed child
+/// before passing the fd via `SCM_RIGHTS`.
+fn open_path_for_access(
+    path: &std::path::Path,
+    access: &nono::AccessMode,
+) -> Result<std::fs::File> {
+    use std::fs::OpenOptions;
+
+    let result = match access {
+        nono::AccessMode::Read => OpenOptions::new().read(true).open(path),
+        nono::AccessMode::Write => OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path),
+        nono::AccessMode::ReadWrite => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path),
+    };
+
+    result.map_err(|e| {
+        NonoError::SandboxInit(format!(
+            "Failed to open {} for {:?} access: {}",
+            path.display(),
+            access,
+            e
+        ))
+    })
+}
+
+/// Resolve a version manager shim to its actual binary for DYLD interposition.
+///
+/// Currently unused -- the DYLD shim is disabled pending arm64 stability work.
+/// Kept for when the shim is re-enabled.
+///
+/// Version managers like pyenv, rbenv, and nodenv use shell script shims
+/// (`#!/usr/bin/env bash`) that route through SIP-protected interpreters.
+/// macOS SIP strips `DYLD_INSERT_LIBRARIES` from platform binaries, so the
+/// nono DYLD shim never gets loaded into the actual runtime binary.
+///
+/// Token-bucket rate limiter for supervisor expansion requests.
+///
+/// Prevents a compromised agent from flooding the terminal with approval prompts.
+/// Defaults to 10 requests/second with a burst of 5.
+struct RateLimiter {
+    /// Maximum tokens (burst capacity)
+    capacity: u32,
+    /// Current available tokens
+    tokens: u32,
+    /// Tokens added per second
+    rate: u32,
+    /// Last token refill time
+    last_refill: std::time::Instant,
+}
+
+impl RateLimiter {
+    fn new(rate: u32, burst: u32) -> Self {
+        Self {
+            capacity: burst,
+            tokens: burst,
+            rate,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    /// Try to consume one token. Returns true if allowed, false if rate limited.
+    fn try_acquire(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill);
+
+        // Refill tokens based on elapsed time
+        let new_tokens = (elapsed.as_millis() as u64)
+            .saturating_mul(self.rate as u64)
+            .saturating_div(1000);
+        if new_tokens > 0 {
+            self.tokens = self.capacity.min(
+                self.tokens
+                    .saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX)),
+            );
+            self.last_refill = now;
+        }
+
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,5 +2097,31 @@ mod tests {
         assert!(!is_dangerous_env_var("CARGO_HOME"));
         assert!(!is_dangerous_env_var("RUST_LOG"));
         assert!(!is_dangerous_env_var("SSH_AUTH_SOCK"));
+    }
+
+    #[test]
+    fn test_rate_limiter_allows_burst() {
+        let mut limiter = RateLimiter::new(10, 5);
+        // Should allow 5 requests (burst capacity)
+        for _ in 0..5 {
+            assert!(limiter.try_acquire());
+        }
+        // 6th should be denied (burst exhausted, no time for refill)
+        assert!(!limiter.try_acquire());
+    }
+
+    #[test]
+    fn test_rate_limiter_refills_over_time() {
+        let mut limiter = RateLimiter::new(10, 3);
+        // Exhaust burst
+        for _ in 0..3 {
+            assert!(limiter.try_acquire());
+        }
+        assert!(!limiter.try_acquire());
+
+        // Simulate time passing by adjusting last_refill
+        limiter.last_refill -= std::time::Duration::from_millis(500);
+        // 500ms at 10/s = 5 tokens, capped at capacity=3
+        assert!(limiter.try_acquire());
     }
 }

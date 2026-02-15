@@ -258,9 +258,10 @@ impl SetupRunner {
 
         // Try creating a test ruleset
         let handled = AccessFs::from_all(abi);
-        Ruleset::default()
+        let rs = Ruleset::default()
             .handle_access(handled)
-            .and_then(|r| r.create())
+            .map_err(|e| NonoError::Setup(format!("Failed to create Landlock ruleset: {}", e)))?;
+        rs.create()
             .map_err(|e| NonoError::Setup(format!("Failed to create Landlock ruleset: {}", e)))?;
 
         println!("  * Ruleset creation verified");

@@ -8,8 +8,9 @@
 use crate::capability::{AccessMode, CapabilitySet};
 use crate::error::{NonoError, Result};
 use crate::sandbox::SupportInfo;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::Path;
 use std::ptr;
 use tracing::{debug, info};
 
@@ -20,6 +21,139 @@ use tracing::{debug, info};
 extern "C" {
     fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> i32;
     fn sandbox_free_error(errorbuf: *mut c_char);
+}
+
+// FFI bindings for sandbox extension API (runtime capability expansion)
+// These are documented in <sandbox.h> and stable across macOS versions.
+// Extensions allow an unsandboxed supervisor to issue tokens that expand
+// a sandboxed process's access for specific paths.
+extern "C" {
+    fn sandbox_extension_issue_file(
+        extension_class: *const c_char,
+        path: *const c_char,
+        flags: u32,
+    ) -> *mut c_char;
+
+    fn sandbox_extension_consume(token: *const c_char) -> i64;
+
+    fn sandbox_extension_release(handle: i64) -> i32;
+}
+
+/// Extension class for read-only access
+const EXT_CLASS_READ: &str = "com.apple.app-sandbox.read";
+
+/// Extension class for read+write access
+const EXT_CLASS_READ_WRITE: &str = "com.apple.app-sandbox.read-write";
+
+/// Issue a sandbox extension token for a path.
+///
+/// Called by the unsandboxed supervisor to create a token that a sandboxed
+/// process can consume to expand its access for the given path.
+///
+/// The token is HMAC-SHA256 authenticated with a per-boot kernel key and
+/// cannot be forged. It is path-specific and class-specific.
+///
+/// # Arguments
+/// * `path` - The filesystem path to grant access to
+/// * `access` - The access mode (Read -> read-only token, Write/ReadWrite -> read-write token)
+///
+/// # Errors
+/// Returns an error if the path contains null bytes or if the kernel rejects the request.
+pub fn extension_issue_file(path: &Path, access: AccessMode) -> Result<String> {
+    let class = match access {
+        AccessMode::Read => EXT_CLASS_READ,
+        AccessMode::Write | AccessMode::ReadWrite => EXT_CLASS_READ_WRITE,
+    };
+
+    let class_c = CString::new(class)
+        .map_err(|_| NonoError::SandboxInit("Extension class contains null byte".to_string()))?;
+
+    let path_str = path.to_str().ok_or_else(|| {
+        NonoError::SandboxInit(format!("Path contains non-UTF-8 bytes: {}", path.display()))
+    })?;
+
+    let path_c = CString::new(path_str).map_err(|_| {
+        NonoError::SandboxInit(format!("Path contains null byte: {}", path.display()))
+    })?;
+
+    // SAFETY: sandbox_extension_issue_file takes valid C strings for class and path,
+    // and a flags argument (0 for default behavior). Returns a heap-allocated C string
+    // token on success, or NULL on failure. The returned string must be freed with free().
+    let token_ptr = unsafe { sandbox_extension_issue_file(class_c.as_ptr(), path_c.as_ptr(), 0) };
+
+    if token_ptr.is_null() {
+        return Err(NonoError::SandboxInit(format!(
+            "sandbox_extension_issue_file failed for path: {}",
+            path.display()
+        )));
+    }
+
+    // SAFETY: token_ptr is a valid, non-null C string returned by sandbox_extension_issue_file.
+    let token = unsafe { CStr::from_ptr(token_ptr) }
+        .to_string_lossy()
+        .into_owned();
+
+    // SAFETY: token_ptr was allocated by sandbox_extension_issue_file and must be freed.
+    unsafe { libc::free(token_ptr.cast::<libc::c_void>()) };
+
+    debug!(
+        "Issued extension token for {} ({:?})",
+        path.display(),
+        access
+    );
+    Ok(token)
+}
+
+/// Consume a sandbox extension token to expand the current process's sandbox.
+///
+/// Called inside a sandboxed process (typically by the DYLD shim) to activate
+/// a token received from the supervisor. After consumption, the sandbox allows
+/// access to the token's path with the token's access class.
+///
+/// Consumed extensions survive `fork()` and `exec()` -- all child processes
+/// inherit the expanded access.
+///
+/// Returns a handle that can be passed to [`extension_release`] to revoke the grant.
+///
+/// # Errors
+/// Returns an error if the token is invalid, expired, or if consumption fails.
+pub fn extension_consume(token: &str) -> Result<i64> {
+    let token_c = CString::new(token)
+        .map_err(|_| NonoError::SandboxInit("Extension token contains null byte".to_string()))?;
+
+    // SAFETY: sandbox_extension_consume takes a valid C string token.
+    // Returns a non-negative handle on success, or -1 on failure.
+    let handle = unsafe { sandbox_extension_consume(token_c.as_ptr()) };
+
+    if handle < 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "sandbox_extension_consume failed (handle={})",
+            handle
+        )));
+    }
+
+    debug!("Consumed extension token (handle={})", handle);
+    Ok(handle)
+}
+
+/// Release a consumed sandbox extension, revoking the dynamically-granted access.
+///
+/// # Errors
+/// Returns an error if the handle is invalid or if the release fails.
+pub fn extension_release(handle: i64) -> Result<()> {
+    // SAFETY: sandbox_extension_release takes a handle from sandbox_extension_consume.
+    // Returns 0 on success, -1 on failure.
+    let result = unsafe { sandbox_extension_release(handle) };
+
+    if result != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "sandbox_extension_release failed for handle {}",
+            handle
+        )));
+    }
+
+    debug!("Released extension (handle={})", handle);
+    Ok(())
 }
 
 /// Check if Seatbelt sandboxing is supported
@@ -237,6 +371,17 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
                 // Write-only doesn't need read access
             }
         }
+    }
+
+    // Extension filter rules for runtime capability expansion via supervisor.
+    // These allow sandbox_extension_consume() tokens to dynamically expand access.
+    // The rules are inert unless a matching token is consumed -- they add no access
+    // by themselves. The supervisor checks never_grant and deny groups before issuing
+    // tokens, so the pre-issuance check is the enforcement point.
+    if caps.extensions_enabled() {
+        profile.push_str("(allow file-read* (extension \"com.apple.app-sandbox.read\"))\n");
+        profile.push_str("(allow file-read* (extension \"com.apple.app-sandbox.read-write\"))\n");
+        profile.push_str("(allow file-write* (extension \"com.apple.app-sandbox.read-write\"))\n");
     }
 
     // SECURITY: Platform deny rules are placed BETWEEN read and write rules.
@@ -576,5 +721,46 @@ mod tests {
         // Group-sourced capabilities should generate the same profile rules
         let profile = generate_profile(&caps).unwrap();
         assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
+    }
+
+    #[test]
+    fn test_generate_profile_extensions_disabled_by_default() {
+        let caps = CapabilitySet::default();
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(!profile.contains("extension"));
+    }
+
+    #[test]
+    fn test_generate_profile_extensions_enabled() {
+        let caps = CapabilitySet::new().enable_extensions();
+        let profile = generate_profile(&caps).unwrap();
+
+        assert!(profile.contains("(allow file-read* (extension \"com.apple.app-sandbox.read\"))"));
+        assert!(
+            profile.contains("(allow file-read* (extension \"com.apple.app-sandbox.read-write\"))")
+        );
+        assert!(profile
+            .contains("(allow file-write* (extension \"com.apple.app-sandbox.read-write\"))"));
+    }
+
+    #[test]
+    fn test_generate_profile_extensions_before_platform_deny_rules() {
+        let mut caps = CapabilitySet::new().enable_extensions();
+        caps.add_platform_rule("(deny file-write-unlink)").unwrap();
+
+        let profile = generate_profile(&caps).unwrap();
+
+        let ext_pos = profile
+            .find("(allow file-read* (extension \"com.apple.app-sandbox.read\"))")
+            .expect("extension rule not found");
+        let deny_pos = profile
+            .find("(deny file-write-unlink)")
+            .expect("deny rule not found");
+
+        assert!(
+            ext_pos < deny_pos,
+            "extension rules must appear before platform deny rules"
+        );
     }
 }

@@ -14,6 +14,7 @@ mod profile;
 mod query_ext;
 mod sandbox_state;
 mod setup;
+mod terminal_approval;
 mod undo_commands;
 mod undo_session;
 mod undo_ui;
@@ -266,7 +267,21 @@ fn run_sandbox(
         return Ok(());
     }
 
+    #[cfg(not(target_os = "linux"))]
     let prepared = prepare_sandbox(&args, silent)?;
+    #[cfg(target_os = "linux")]
+    let mut prepared = prepare_sandbox(&args, silent)?;
+
+    // Enable sandbox extensions for transparent capability expansion in supervised mode.
+    // On Linux, seccomp-notify intercepts syscalls at the kernel level -- this flag is
+    // informational only (seccomp is installed separately in the child process).
+    // On macOS, extensions_enabled controls SBPL extension filter rules. Currently
+    // disabled because the DYLD interposition shim is not yet stable on arm64.
+    #[cfg(target_os = "linux")]
+    if supervised {
+        prepared.caps.set_extensions_enabled(true);
+    }
+
     execute_sandboxed(
         program,
         cmd_args,
@@ -557,8 +572,18 @@ fn execute_sandboxed(
                 None
             };
 
+            // --- Supervisor IPC setup ---
+            // Load never_grant paths from policy and create approval backend
+            let policy_data = policy::load_embedded_policy()?;
+            let never_grant_checker = nono::NeverGrantChecker::new(&policy_data.never_grant)?;
+            let approval_backend = terminal_approval::TerminalApproval;
+            let supervisor_cfg = exec_strategy::SupervisorConfig {
+                never_grant: &never_grant_checker,
+                approval_backend: &approval_backend,
+            };
+
             let started = chrono::Local::now().to_rfc3339();
-            let exit_code = exec_strategy::execute_supervised(&config)?;
+            let exit_code = exec_strategy::execute_supervised(&config, Some(&supervisor_cfg))?;
             let ended = chrono::Local::now().to_rfc3339();
 
             // Post-exit: take final snapshot and offer restore

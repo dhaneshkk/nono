@@ -1,0 +1,37 @@
+{
+  "family": "nono-sandbox-poc",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "nono-agent",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/nono-sandbox-poc:latest",
+      "essential": true,
+      "readonlyRootFilesystem": false,
+      "linuxParameters": {
+        "initProcessEnabled": true
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/nono-sandbox-poc",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "nono"
+        }
+      },
+      "environment": [
+        {
+          "name": "NONO_LOG",
+          "value": "info"
+        }
+      ]
+    }
+  ]
+}
