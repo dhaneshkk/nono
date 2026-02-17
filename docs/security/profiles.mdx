@@ -117,6 +117,35 @@ Currently supported targets:
 
 Hook installation is idempotent - nono only installs or updates when needed.
 
+### Undo Section
+
+The `undo` section configures which paths are excluded from undo snapshots when using `--supervised` mode. This is useful for excluding build artifacts, caches, or other files that don't need restoration.
+
+```json
+{
+  "undo": {
+    "exclude_patterns": [
+      ".git",
+      "node_modules",
+      "__pycache__",
+      "target"
+    ],
+    "exclude_globs": [
+      "*.log",
+      "*.tmp",
+      ".*.swp"
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `exclude_patterns` | Directory/file names to exclude (matched by component) |
+| `exclude_globs` | Glob patterns to exclude |
+
+These exclusions apply in addition to gitignore rules (if present in the tracked directories). Excluding large directories like `node_modules` significantly improves snapshot performance.
+
 ### Interactive Mode
 
 The `interactive` field (default: `false`) indicates whether the application has an interactive terminal UI that requires TTY preservation:
@@ -169,7 +198,7 @@ Profiles support these environment variables in path values:
 
 3. Use the profile:
    ```bash
-   nono run --profile my-agent --trust-unsigned -- my-agent-command
+   nono run --profile my-agent -- my-agent-command
    ```
 
 ## Profile Verification

@@ -53,7 +53,6 @@ crates/nono-cli/src/                # CLI - security policy and UX
 │   ├── mod.rs                      # Config module root
 │   ├── embedded.rs                 # Embedded data (build.rs artifacts)
 │   ├── user.rs                     # User configuration
-│   ├── verify.rs                   # Signature verification
 │   └── version.rs                  # Version tracking
 └── profile/
     ├── mod.rs                      # Profile loading
