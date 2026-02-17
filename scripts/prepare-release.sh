@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Helper script to prepare a release
+# Helper script to prepare a release for nono workspace
 # Usage: ./scripts/prepare-release.sh
 
 set -euo pipefail
@@ -11,8 +11,8 @@ if ! command -v git-cliff &> /dev/null; then
     exit 1
 fi
 
-# Get current version from Cargo.toml
-CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+# Get current version from workspace root Cargo.toml (nono crate)
+CURRENT_VERSION=$(grep '^version = ' crates/nono/Cargo.toml | head -1 | cut -d'"' -f2)
 echo "Current version: ${CURRENT_VERSION}"
 
 # Calculate next version based on commits (returns with 'v' prefix like 'v0.2.2')
@@ -29,12 +29,25 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-# Update Cargo.toml
-echo "Updating Cargo.toml..."
-sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" Cargo.toml
-rm Cargo.toml.bak
+# Update all crate versions
+echo "Updating crate versions..."
 
-# Update Cargo.lock to reflect the new version
+# Update nono (core library)
+sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" crates/nono/Cargo.toml
+rm crates/nono/Cargo.toml.bak
+
+# Update nono-cli
+sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" crates/nono-cli/Cargo.toml
+# Also update the nono dependency version
+sed -i.bak "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" crates/nono-cli/Cargo.toml
+rm crates/nono-cli/Cargo.toml.bak
+
+# Update nono-ffi
+sed -i.bak "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEXT_VERSION}\"/" bindings/c/Cargo.toml
+sed -i.bak "s/nono = { version = \"[^\"]*\"/nono = { version = \"${NEXT_VERSION}\"/" bindings/c/Cargo.toml
+rm bindings/c/Cargo.toml.bak
+
+# Update Cargo.lock to reflect the new versions
 echo "Updating Cargo.lock..."
 cargo check --quiet
 
@@ -43,11 +56,10 @@ echo "Generating CHANGELOG.md..."
 git cliff --unreleased --tag "${NEXT_VERSION_WITH_V}" --prepend CHANGELOG.md
 
 echo ""
-echo "✅ Release prepared!"
+echo "Release prepared!"
 echo ""
 echo "Next steps:"
 echo "1. Review the changes in CHANGELOG.md"
-echo "2. Sign policy (if changed): minisign -Sm crates/nono-cli/data/policy.json -s /path/to/release-key.key"
-echo "3. Commit: git add Cargo.toml Cargo.lock CHANGELOG.md && git commit -m 'Release v${NEXT_VERSION}'"
-echo "4. Tag: git tag v${NEXT_VERSION}"
-echo "5. Push: git push -u origin main && git push origin v${NEXT_VERSION}"
+echo "2. Commit: git add crates/*/Cargo.toml bindings/c/Cargo.toml Cargo.lock CHANGELOG.md && git commit -m 'Release v${NEXT_VERSION}'"
+echo "3. Tag: git tag v${NEXT_VERSION}"
+echo "4. Push: git push origin main && git push origin v${NEXT_VERSION}"

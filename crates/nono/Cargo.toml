@@ -1,6 +1,6 @@
 [package]
 name = "nono"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Capability-based sandboxing library using Landlock (Linux) and Seatbelt (macOS)"
+readme = "README.md"
 keywords = ["sandbox", "security", "capability", "landlock", "seatbelt"]
 categories = ["os", "api-bindings"]
 

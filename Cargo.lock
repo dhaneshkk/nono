@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "getrandom 0.4.1",
  "globset",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "nono-cli"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",

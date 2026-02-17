@@ -24,27 +24,27 @@ trap cleanup EXIT
 
 print_header() {
     echo ""
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
     echo -e "${BLUE}  $1${NC}"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}------------------------------------------------------------${NC}"
 }
 
 pass() {
-    echo -e "  ${GREEN}✓ PASS${NC}: $1"
+    echo -e "  ${GREEN}PASS${NC}: $1"
     PASSED=$((PASSED + 1))
 }
 
 fail() {
-    echo -e "  ${RED}✗ FAIL${NC}: $1"
+    echo -e "  ${RED}FAIL${NC}: $1"
     FAILED=$((FAILED + 1))
 }
 
 skip() {
-    echo -e "  ${YELLOW}○ SKIP${NC}: $1"
+    echo -e "  ${YELLOW}SKIP${NC}: $1"
 }
 
 info() {
-    echo -e "  ${YELLOW}ℹ${NC} $1"
+    echo -e "  ${YELLOW}INFO${NC}: $1"
 }
 
 # ============================================================================
@@ -126,7 +126,6 @@ else
 fi
 
 # Test 2: Write outside allowed path should fail
-# The error comes from sh, not nono, so look for various permission errors
 OUTSIDE_OUTPUT=$($NONO run --allow "$TEST_DIR" --allow-cwd -- sh -c "echo 'bad' > /tmp/nono-outside-$$.txt" 2>&1 || true)
 if echo "$OUTSIDE_OUTPUT" | grep -qiE "permission denied|cannot create|EACCES|not permitted"; then
     pass "Write outside allowed path blocked"
@@ -146,7 +145,6 @@ READONLY_OUTPUT=$($NONO run --read "$TEST_DIR/readonly" --allow-cwd -- sh -c "ec
 if echo "$READONLY_OUTPUT" | grep -qiE "permission denied|cannot create|not permitted"; then
     pass "Read-only path blocks writes"
 else
-    # Also check if file was actually modified
     if grep -q "original" "$TEST_DIR/readonly/file.txt"; then
         pass "Read-only path blocks writes (content unchanged)"
     else
@@ -232,7 +230,6 @@ if $NETWORK_SUPPORTED; then
         if echo "$NET_BLOCK_OUTPUT" | grep -qiE "denied|refused|failed|couldn't connect|connection.*failed|error"; then
             pass "Network blocked with --net-block"
         else
-            # Check if curl returned empty (which means blocked)
             if [[ -z "$NET_BLOCK_OUTPUT" ]] || [[ "$NET_BLOCK_OUTPUT" == *"exit"* ]]; then
                 pass "Network blocked with --net-block (no response)"
             else
@@ -270,7 +267,6 @@ RM_OUTPUT=$($NONO run --allow "$TEST_DIR" --allow-cwd -- rm -rf / 2>&1 || true)
 if echo "$RM_OUTPUT" | grep -qiE "blocked|dangerous|not allowed"; then
     pass "rm -rf blocked as dangerous command"
 else
-    # Check if it failed for other reasons (sandbox, etc)
     if echo "$RM_OUTPUT" | grep -qiE "permission denied|not permitted"; then
         pass "rm -rf blocked by sandbox"
     else
@@ -285,7 +281,6 @@ fi
 print_header "Dry Run Mode"
 
 # Test: Dry run should show capabilities without applying sandbox
-# Use echo to auto-respond to any prompts
 DRY_OUTPUT=$(echo "n" | $NONO run --allow "$TEST_DIR" --read /etc --dry-run -- echo test 2>&1 || true)
 if echo "$DRY_OUTPUT" | grep -qiE "dry.?run|would.*grant|capabilities"; then
     pass "Dry run shows mode indicator"
