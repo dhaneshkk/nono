@@ -194,6 +194,41 @@ Every sandboxed session records what command was run, when it started and ended,
 ```bash
 # Show audit record for a session
 nono audit show 20260216-193311-20751 --json
+❯ nono audit show 20260216-193311-20751 --json
+{
+  "command": [
+    "sh",
+    "-c",
+    "echo done"
+  ],
+  "ended": "2026-02-16T19:33:11.519810+00:00",
+  "exit_code": 0,
+  "merkle_roots": [
+    "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
+    "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753"
+  ],
+  "session_id": "20260216-193311-20751",
+  "snapshots": [
+    {
+      "changes": [],
+      "file_count": 1,
+      "merkle_root": "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
+      "number": 0,
+      "timestamp": "1771270391"
+    },
+    {
+      "changes": [],
+      "file_count": 1,
+      "merkle_root": "2ee13961d5b9ec78cca0c2bd1bad29ea39c3b2256df00dec97978e131961b753",
+      "number": 1,
+      "timestamp": "1771270391"
+    }
+  ],
+  "started": "2026-02-16T19:33:11.496516+00:00",
+  "tracked_paths": [
+    "/Users/jsmith/project"
+  ]
+}
 ```
 
 ## Quick Start
