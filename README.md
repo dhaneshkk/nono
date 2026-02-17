@@ -2,7 +2,7 @@
 
 <img src="assets/nono-logo.png" alt="nono logo" width="600"/>
 
-**The AI agent security framework that makes the dangerous bits structurally impossible.**
+**AI agent security that makes the dangerous bits structurally impossible.**
 
 <p>
   From the creator of
