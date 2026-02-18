@@ -33,7 +33,7 @@ jobs:
 
           # macOS x86_64 (Intel)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             artifact: nono
 
           # macOS aarch64 (Apple Silicon)
