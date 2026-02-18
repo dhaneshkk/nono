@@ -8,17 +8,14 @@ nono wraps any command with an OS-level sandbox. You specify what the command is
 
 ## Commands
 
-nono provides the following commands:
+nono provides three main commands:
 
 | Command | Description |
 |---------|-------------|
 | `nono run` | Run a command inside the sandbox |
 | `nono shell` | Start an interactive shell inside the sandbox |
 | `nono why` | Check why a path/network operation would be allowed or denied |
-| `nono setup` | Set up profiles and verify installation |
-| `nono undo` | Manage undo sessions (browse, restore, cleanup) |
-| `nono audit` | View audit trail of sandboxed sessions |
-| `nono learn` | Trace a command to discover required paths (Linux only) |
+| `nono setup` | Sets up profiles (openclaw, claude etc) |
 
 ## Running Commands (`nono run`)
 
@@ -98,55 +95,6 @@ nono shell --allow . --shell /bin/zsh
 ```
 
 Exit the shell with `Ctrl-D` or `exit`.
-
-## Supervised Mode and Undo
-
-Supervised mode (`--supervised`) enables the undo system, which takes filesystem snapshots before and after execution. If an agent makes unwanted changes, you can restore files to their previous state.
-
-```bash
-# Run with undo enabled
-nono run --supervised --allow . -- claude
-
-# After exit, you'll be prompted to review changes and optionally restore
-```
-
-When the sandboxed process exits, nono presents an interactive prompt showing what files changed. You can restore to the pre-session state or exit without changes.
-
-### Managing Undo Sessions
-
-Use `nono undo` to manage past sessions:
-
-```bash
-# List sessions with file changes
-nono undo list
-
-# Show changes in a session
-nono undo show 20260214-143022-12345 --diff
-
-# Restore files from a session (dry-run first)
-nono undo restore 20260214-143022-12345 --dry-run
-
-# Verify session integrity
-nono undo verify 20260214-143022-12345
-
-# Clean up old sessions
-nono undo cleanup --older-than 30
-```
-
-### Audit Trail
-
-Use `nono audit` to review the audit trail of all sandboxed sessions:
-
-```bash
-# List all sessions
-nono audit list
-
-# Filter by date or command
-nono audit list --today --command claude
-
-# Show audit details for a session
-nono audit show 20260214-143022-12345 --json
-```
 
 ## Understanding Permissions
 

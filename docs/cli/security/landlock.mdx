@@ -71,11 +71,12 @@ AccessFs::MakeFifo
 AccessFs::MakeBlock
 AccessFs::MakeSym
 AccessFs::RemoveFile  // File deletion (needed for atomic writes)
+AccessFs::RemoveDir   // Directory deletion (needed for rename() on directories)
 AccessFs::Refer       // Rename/hard link across directories (ABI v2+)
 AccessFs::Truncate    // ABI v3+
 ```
 
-Note: `RemoveDir` is intentionally excluded for safety - directory deletion is blocked even within writable paths.
+Note: `RemoveFile` and `RemoveDir` are both included because `rename()` requires removal rights on the source. This enables atomic write patterns (write to `.tmp` then rename to target) for both files and directories.
 
 ### Full Access (`--allow`)
 
@@ -185,13 +186,6 @@ Note: DNS resolution (UDP) is not blocked by Landlock, only TCP connections.
 ### Bind Mounts
 
 Landlock follows bind mounts. If `/home` is bind-mounted to `/mnt/home`, access to one affects the other. This is usually not a concern but can be surprising in complex mount configurations.
-
-### No Deny-Within-Allow Semantics
-
-Landlock is allow-list only. It cannot enforce "deny a child path under an allowed parent."  
-Example: allowing `/tmp` while denying `/tmp/.credentials` is not enforceable by Landlock.
-
-nono treats this as a configuration error on Linux and refuses to start when such overlap is detected, rather than running with a silently ineffective deny rule.
 
 ### Special Filesystems
 

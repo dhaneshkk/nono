@@ -29,10 +29,10 @@
           "cli/security/index",
           "cli/security/profiles",
           "cli/security/signing",
-          "cli/security/vs-containers",
+          "cli/security/containers",
           "cli/security/landlock",
           "cli/security/seatbelt",
-          "cli/security/vs-application"
+          "cli/security/application"
         ]
       },
       {

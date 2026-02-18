@@ -35,34 +35,31 @@ The built-in profile provides:
 
 ## Custom Profile
 
-Create `~/.config/nono/profiles/opencode.json` for different permissions:
+Create `~/.config/nono/profiles/opencode.toml` for different permissions:
 
-```json
-{
-  "meta": {
-    "name": "opencode",
-    "version": "1.0.0",
-    "description": "OpenCode with restricted access"
-  },
-  "filesystem": {
-    "allow": ["$WORKDIR"],
-    "read": [
-      "$XDG_CONFIG_HOME/opencode",
-      "$XDG_DATA_HOME/opencode"
-    ]
-  },
-  "network": {
-    "block": false
-  },
-  "secrets": {
-    "openai_api_key": "OPENAI_API_KEY"
-  }
-}
+```toml
+[meta]
+name = "opencode"
+version = "1.0.0"
+description = "OpenCode with restricted access"
+
+[filesystem]
+allow = ["$WORKDIR"]
+read = [
+  "$XDG_CONFIG_HOME/opencode",
+  "$XDG_DATA_HOME/opencode"
+]
+
+[network]
+block = false
+
+[secrets]
+openai_api_key = "OPENAI_API_KEY"
 ```
 
 **Usage:**
 ```bash
-nono run --profile opencode --trust-unsigned --secrets -- opencode
+nono run --profile opencode --secrets -- opencode
 ```
 
 ## Security Tips

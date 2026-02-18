@@ -51,7 +51,7 @@ A nono-generated Seatbelt profile follows this structure:
 ; Executable mapping (required for dyld)
 (allow file-map-executable)
 
-; System paths from policy.json groups
+; System paths from security-lists.toml
 (allow file-read* (subpath "/System/Library"))
 (allow file-read* (subpath "/usr/lib"))
 (allow file-read* (subpath "/private/var/db/dyld"))
@@ -89,7 +89,7 @@ This approach:
 
 ## System Paths
 
-nono allows read access to system paths required for running executables. These are defined in `policy.json` groups (`system_read_macos`, `system_read_linux`):
+nono allows read access to system paths required for running executables. These are loaded from `security-lists.toml`:
 
 | Category | Paths | Purpose |
 |----------|-------|---------|
@@ -118,12 +118,6 @@ nono explicitly denies data access to credential storage:
 | Credential Files | `~/.git-credentials`, `~/.netrc`, `~/.npmrc` |
 
 Users can override these with explicit `--allow` or `--read` flags.
-
-<Warning>
-  If you explicitly grant `~/Library/Keychains/login.keychain-db` (or `/Library/Keychains/login.keychain-db`), nono relaxes the default deny rules for `com.apple.SecurityServer` / `com.apple.securityd` Mach lookups so keychain-backed auth flows can work.
-
-  This is broader than file-level access alone: keychain operations are mediated via Mach IPC, so allowing `login.keychain-db` can implicitly enable access to other keychain items available to the calling user context.
-</Warning>
 
 ## System Operations
 

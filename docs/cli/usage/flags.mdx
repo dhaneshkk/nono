@@ -76,12 +76,12 @@ Compare against an existing profile to show only missing paths.
 nono learn --profile opencode -- opencode
 ```
 
-### `--json`
+### `--toml`
 
-Output discovered paths as a JSON fragment suitable for a profile.
+Output discovered paths as a TOML fragment suitable for a profile.
 
 ```bash
-nono learn --json -- my-app > paths.json
+nono learn --toml -- my-app > paths.toml
 ```
 
 ### `--timeout`
@@ -285,58 +285,6 @@ nono run --profile claude-code --allow-cwd -- claude
 nono -s run --profile claude-code --allow-cwd -- claude
 ```
 
-### Execution Mode Flags
-
-#### `--supervised`
-
-Use supervised execution mode: fork first, then sandbox only the child process. The parent process stays unsandboxed for diagnostics, monitoring, and undo functionality.
-
-```bash
-# Enable undo functionality with supervised mode
-nono run --supervised --allow . -- claude
-```
-
-In supervised mode:
-- nono takes a filesystem snapshot before the command runs
-- nono takes a final snapshot when the command exits
-- You're prompted to review changes and optionally restore files
-- The unsandboxed parent can provide better diagnostics on failures
-- On Linux, seccomp-notify capability expansion is authorized by paths opened by the parent supervisor and injected as file descriptors (notification validity checks are liveness checks, not the authorization boundary)
-- Supervised mode requires single-threaded fork safety; `--secrets` is intentionally incompatible in this mode to avoid keyring-thread fork deadlocks
-
-This is required for the undo system and recommended for long-running agent sessions.
-
-#### `--no-undo-prompt`
-
-Skip the post-exit undo review prompt in supervised mode. Snapshots are still taken for audit purposes, but the interactive restore UI is suppressed.
-
-```bash
-# Supervised mode without interactive prompt (for CI/scripts)
-nono run --supervised --no-undo-prompt --allow . -- my-agent
-```
-
-#### `--exec`
-
-Use direct exec mode: apply sandbox, then exec directly into the command. nono disappears from the process tree. This preserves TTY for interactive applications but loses monitoring capabilities.
-
-```bash
-# Direct exec for interactive apps that need full TTY
-nono run --exec --allow . -- vim
-```
-
-<Note>
-  Direct mode (`--exec`) is the legacy behavior. Monitor mode (default) or supervised mode (`--supervised`) are recommended for most use cases.
-</Note>
-
-#### `--no-diagnostics`
-
-Suppress the diagnostic footer on command failure. By default, nono prints a helpful summary when commands exit non-zero.
-
-```bash
-# Suppress diagnostics for scripts that parse stderr
-nono run --no-diagnostics --allow . -- my-script
-```
-
 ### Operational Flags
 
 #### `--dry-run`
@@ -463,164 +411,6 @@ Available context flags:
 - `--net-block` - Block network access
 - `--profile`, `-p` - Use a named profile
 - `--workdir` - Working directory for `$WORKDIR` expansion
-
-## `nono undo`
-
-Manage undo sessions. Use with `--supervised` mode to enable filesystem snapshots that can be restored.
-
-```bash
-nono undo <SUBCOMMAND>
-```
-
-### `nono undo list`
-
-List sessions with file changes.
-
-```bash
-nono undo list [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--recent N` | Show only the N most recent sessions |
-| `--all` | Show all sessions (including those with no file changes) |
-| `--json` | Output as JSON |
-
-```bash
-# List recent sessions
-nono undo list
-
-# Show last 5 sessions as JSON
-nono undo list --recent 5 --json
-```
-
-### `nono undo show`
-
-Show changes in a session.
-
-```bash
-nono undo show <SESSION_ID> [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--diff` | Show unified diff (git diff style) |
-| `--side-by-side` | Show side-by-side diff |
-| `--full` | Show full file content from snapshot |
-| `--json` | Output as JSON |
-
-```bash
-# Show changes with diff
-nono undo show 20260214-143022-12345 --diff
-
-# Export as JSON
-nono undo show 20260214-143022-12345 --json
-```
-
-### `nono undo restore`
-
-Restore files from a past session.
-
-```bash
-nono undo restore <SESSION_ID> [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--snapshot N` | Restore to snapshot N (default: last snapshot) |
-| `--dry-run` | Show what would change without modifying files |
-
-```bash
-# Preview what would be restored
-nono undo restore 20260214-143022-12345 --dry-run
-
-# Restore to baseline (pre-session state)
-nono undo restore 20260214-143022-12345 --snapshot 0
-```
-
-### `nono undo verify`
-
-Verify session integrity by checking Merkle tree and object store hashes.
-
-```bash
-nono undo verify <SESSION_ID>
-```
-
-### `nono undo cleanup`
-
-Clean up old sessions.
-
-```bash
-nono undo cleanup [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--keep N` | Retain N newest sessions |
-| `--older-than DAYS` | Remove sessions older than N days |
-| `--dry-run` | Show what would be removed without deleting |
-| `--all` | Remove all sessions (requires confirmation) |
-
-```bash
-# Preview cleanup
-nono undo cleanup --older-than 30 --dry-run
-
-# Clean up old sessions
-nono undo cleanup --keep 10 --older-than 30
-```
-
-## `nono audit`
-
-View the audit trail of sandboxed sessions. Unlike `nono undo`, this includes all sessions (even read-only commands).
-
-```bash
-nono audit <SUBCOMMAND>
-```
-
-### `nono audit list`
-
-List all sandboxed sessions.
-
-```bash
-nono audit list [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--today` | Show only sessions from today |
-| `--since DATE` | Show sessions since date (YYYY-MM-DD) |
-| `--until DATE` | Show sessions until date (YYYY-MM-DD) |
-| `--command CMD` | Filter by command name |
-| `--path PATH` | Filter by tracked path |
-| `--recent N` | Show only the N most recent sessions |
-| `--json` | Output as JSON |
-
-```bash
-# List today's sessions
-nono audit list --today
-
-# Filter by command
-nono audit list --command claude --recent 10
-
-# Date range query
-nono audit list --since 2026-02-01 --until 2026-02-15
-```
-
-### `nono audit show`
-
-Show audit details for a session.
-
-```bash
-nono audit show <SESSION_ID> [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--json` | Output as JSON |
-
-```bash
-nono audit show 20260214-143022-12345 --json
-```
 
 ## `nono setup` Options
 

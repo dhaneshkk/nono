@@ -34,40 +34,38 @@ nono has already proven capable of stopping some nasty reported CVEs from exploi
 
 ## Custom Profile
 
-If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.json`:
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.toml`:
 
 ```bash
 mkdir -p ~/.config/nono/profiles
 ```
 
-```json
-{
-  "meta": {
-    "name": "openclaw-strict",
-    "version": "1.0.0",
-    "description": "OpenClaw with read-only config access"
-  },
-  "filesystem": {
-    "allow": ["$WORKDIR"],
-    "read": ["$HOME/.openclaw", "$HOME/.config/openclaw"]
-  },
-  "network": {
-    "block": false
-  },
-  "secrets": {
-    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
-    "openai_api_key": "OPENAI_API_KEY"
-  }
-}
+```toml
+[meta]
+name = "openclaw-strict"
+version = "1.0.0"
+description = "OpenClaw with read-only config access"
+
+[filesystem]
+allow = ["$WORKDIR"]
+read = ["$HOME/.openclaw", "$HOME/.config/openclaw"]
+
+[network]
+block = false  # Required for messaging APIs
+
+[secrets]
+# Load credentials from system keystore instead of files
+telegram_bot_token = "TELEGRAM_BOT_TOKEN"
+openai_api_key = "OPENAI_API_KEY"
 ```
 
-**Usage (custom profiles require `--trust-unsigned`):**
+**Usage:**
 ```bash
-nono run --profile openclaw-strict --trust-unsigned --secrets -- openclaw gateway
+nono run --profile openclaw-strict --secrets -- openclaw gateway
 ```
 
 <Note>
-Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.json`, it will be used instead of the built-in.
+Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.toml`, it will be used instead of the built-in.
 </Note>
 
 See [Security Profiles](/security/profiles) for the full profile format reference.
