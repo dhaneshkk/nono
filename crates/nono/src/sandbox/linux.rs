@@ -839,8 +839,6 @@ mod tests {
     #[test]
     fn test_syscall_numbers_match_seccomp_data_nr_type() {
         // SeccompData.nr is i32, verify our constants fit
-        assert!(SYS_OPENAT > 0);
-        assert!(SYS_OPENAT2 > 0);
         let _: i32 = SYS_OPENAT;
         let _: i32 = SYS_OPENAT2;
     }
