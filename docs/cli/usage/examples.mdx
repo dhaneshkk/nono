@@ -12,13 +12,13 @@ Common usage patterns and recipes for nono.
 Run Claude Code with access limited to your project:
 
 ```bash
-nono run --allow . -- claude
+nono run --allow-cwd -- claude
 ```
 
 Allow Claude to read your global config:
 
 ```bash
-nono run --allow . --read-file ~/.claude/config.json -- claude
+nono run --allow-cwd --read-file ~/.claude/config.json -- claude
 ```
 
 Start an interactive shell inside the sandbox:
@@ -76,7 +76,7 @@ nono why --path ./src --op read --profile claude-code
 
 ```bash
 # AI agents can query their own capabilities
-nono run --allow . -- nono why --self --path /tmp --op write --json
+nono run --allow-cwd -- nono why --self --path /tmp --op write --json
 # {"status":"denied","reason":"not_in_allowed_paths",...}
 ```
 
@@ -98,7 +98,7 @@ nono why --host api.openai.com --net-block
 
 ```bash
 # Full build with all access
-nono run --allow . -- cargo build
+nono run --allow-cwd -- cargo build
 
 # Read source, write only to target
 nono run --read ./src --read ./Cargo.toml --read ./Cargo.lock --allow ./target -- cargo build
@@ -108,19 +108,19 @@ nono run --read ./src --read ./Cargo.toml --read ./Cargo.lock --allow ./target -
 
 ```bash
 # Install dependencies (requires network, allowed by default)
-nono run --allow . -- npm install
+nono run --allow-cwd -- npm install
 
 # Run build (offline)
-nono run --allow . --net-block -- npm run build
+nono run --allow-cwd --net-block -- npm run build
 
 # Run tests
-nono run --allow . -- npm test
+nono run --allow-cwd -- npm test
 ```
 
 ### Make
 
 ```bash
-nono run --allow . -- make
+nono run --allow-cwd -- make
 ```
 
 ## Network Operations
@@ -132,7 +132,7 @@ nono run --allow . -- make
 nono run --write ./downloads -- curl -o ./downloads/file.tar.gz https://example.com/file.tar.gz
 
 # API request
-nono run --allow . -- curl -X POST https://api.example.com/data
+nono run --allow-cwd -- curl -X POST https://api.example.com/data
 ```
 
 ### Git Operations
@@ -142,11 +142,11 @@ nono run --allow . -- curl -X POST https://api.example.com/data
 nono run --allow ./repos -- git clone https://github.com/user/repo.git
 
 # Local operations
-nono run --allow . -- git status
-nono run --allow . -- git commit -m "message"
+nono run --allow-cwd -- git status
+nono run --allow-cwd -- git commit -m "message"
 
 # Push/pull (network allowed by default)
-nono run --allow . -- git push
+nono run --allow-cwd -- git push
 ```
 
 ## Multi-Directory Access
@@ -166,7 +166,7 @@ nono run --allow ./project-a --allow ./project-b -- my-tool
 ### Shared Dependencies
 
 ```bash
-nono run --allow . --read ~/.local/share/my-tool -- my-tool
+nono run --allow-cwd --read ~/.local/share/my-tool -- my-tool
 ```
 
 ## Debugging and Testing
@@ -176,30 +176,30 @@ nono run --allow . --read ~/.local/share/my-tool -- my-tool
 Preview what access would be granted:
 
 ```bash
-nono run --allow . --read /etc --dry-run -- my-agent
+nono run --allow-cwd --read /etc --dry-run -- my-agent
 ```
 
 ### Verbose Output
 
 ```bash
 # Maximum verbosity
-nono run -vvv --allow . -- command
+nono run -vvv --allow-cwd -- command
 ```
 
 ### Testing Sandbox Enforcement
 
 ```bash
 # Should succeed - writing to allowed path
-nono run --allow . -- sh -c "echo test > ./allowed.txt"
+nono run --allow-cwd -- sh -c "echo test > ./allowed.txt"
 
 # Should fail - writing outside allowed path
-nono run --allow . -- sh -c "echo test > /tmp/blocked.txt"
+nono run --allow-cwd -- sh -c "echo test > /tmp/blocked.txt"
 
 # Should succeed - network allowed by default
-nono run --allow . -- curl https://example.com
+nono run --allow-cwd -- curl https://example.com
 
 # Should fail - network blocked with --net-block
-nono run --allow . --net-block -- curl https://example.com
+nono run --allow-cwd --net-block -- curl https://example.com
 ```
 
 ## Shell Scripts
@@ -207,13 +207,13 @@ nono run --allow . --net-block -- curl https://example.com
 ### Running a Script
 
 ```bash
-nono run --allow . -- ./my-script.sh
+nono run --allow-cwd -- ./my-script.sh
 ```
 
 ### Inline Commands
 
 ```bash
-nono run --allow . -- sh -c "echo hello && ls -la"
+nono run --allow-cwd -- sh -c "echo hello && ls -la"
 ```
 
 ## Configuration Files
@@ -221,13 +221,13 @@ nono run --allow . -- sh -c "echo hello && ls -la"
 ### Read-Only Config
 
 ```bash
-nono run --allow . --read-file ~/.config/myapp/config.toml -- myapp
+nono run --allow-cwd --read-file ~/.config/myapp/config.toml -- myapp
 ```
 
 ### Multiple Config Files
 
 ```bash
-nono run --allow . \
+nono run --allow-cwd \
   --read-file ~/.gitconfig \
   --read-file ~/.npmrc \
   -- my-tool
@@ -296,7 +296,7 @@ nono run \
 
 ```bash
 nono run \
-  --allow . \
+  --allow-cwd \
   --net-block \
   -- make release
 ```
