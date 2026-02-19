@@ -31,7 +31,7 @@
 
 AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
 
-Kernel-enforced sandboxing (Landlock on Linux, Seatbelt on macOS) blocks unauthorized access at the syscall level. Destructive commands are denied before they run. Secrets are injected securely without touching disk. Every filesystem change gets a rollback snapshot. Every command leaves a tamper resistant trail. When the agent needs to do something outside its permissions, a supervisor handles approval.
+Kernel-enforced sandboxing (Landlock on Linux, Seatbelt on macOS) blocks unauthorized access at the syscall level. Destructive commands are denied before they run. Secrets are injected securely without touching disk. Every filesystem change gets a rollback snapshot. Every command leaves a tamper resistant trail. When the agent needs to do something outside its permissions, a kernel-mediated supervisor intercepts the syscall via seccomp, opens the file itself after user approval, and injects only the file descriptor — the agent never executes its own open. No root, or `CAP_SYS_ADMIN` needed.
 
 ## CLI
 
