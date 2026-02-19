@@ -160,7 +160,7 @@ Profiles compose groups by name and add their own filesystem entries on top:
 
 ### Destructive Command Blocking
 
-Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`, and others) are blocked before execution. This is layered on top of the kernel sandbox as defense-in-depth -- even if a command were allowed, the sandbox would still enforce filesystem restrictions. Commands can be selectively allowed or additional commands blocked per invocation.
+Dangerous commands (`rm`, `dd`, `chmod`, `sudo`, `scp`, and others) are blocked before execution. Commands can be selectively allowed or additional commands blocked per invocation in accordance with user profiles.
 
 ```bash
 # rm is blocked by default
@@ -170,6 +170,9 @@ nono: blocked command: rm
 # Selectively allow a blocked command
 nono run --allow-cwd --allow-command rm -- rm ./temp-file.txt
 ```
+
+> [!WARNING]
+> This feature will be reinvented at some point, as execution of dangerous commands can still pass by masking, e.g. placed inside sh -c '...', or a wrapper script. This is layered on top of the kernel sandbox as defense-in-depth, as even if a command were allowed, the sandbox would still enforce filesystem restrictions. . The current model trusts that the sandbox restrictions are the real security boundary, and not command blocking, which is more a layered defense. 
 
 ### Undo and Snapshots (Coming Soon!)
 
