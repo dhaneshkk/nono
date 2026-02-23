@@ -24,6 +24,9 @@ walkdir.workspace = true
 ignore.workspace = true
 globset.workspace = true
 
+# CIDR network filtering
+ipnet = "2"
+
 # Unix socket IPC for supervisor
 libc = "0.2"
 

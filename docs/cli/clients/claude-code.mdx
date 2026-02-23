@@ -62,7 +62,7 @@ anthropic_api_key = "ANTHROPIC_API_KEY"
 
 **Usage:**
 ```bash
-nono run --profile claude-code --secrets -- claude
+nono run --profile claude-code --env-credential -- claude
 ```
 
 <Note>
@@ -87,7 +87,7 @@ secret-tool store --label="nono: anthropic_api_key" service nono username anthro
 
 Then run with secrets:
 ```bash
-nono run --profile claude-code --secrets anthropic_api_key -- claude
+nono run --profile claude-code --env-credential anthropic_api_key -- claude
 ```
 
 See [Secrets Management](/cli/features/secrets) for full documentation.

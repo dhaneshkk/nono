@@ -229,6 +229,28 @@ pub struct SandboxArgs {
     #[arg(long)]
     pub net_block: bool,
 
+    // === Network proxy filtering ===
+    /// Enable network proxy filtering with a named profile (e.g., claude-code, minimal, enterprise).
+    /// When set, outbound network is restricted to hosts in the profile's allowlist.
+    #[arg(long, value_name = "PROFILE")]
+    pub network_profile: Option<String>,
+
+    /// Allow additional hosts through the proxy (on top of network profile).
+    /// Can be specified multiple times.
+    #[arg(long, value_name = "HOST")]
+    pub proxy_allow: Vec<String>,
+
+    /// Enable credential injection via reverse proxy for a service.
+    /// Service names map to entries in network-policy.json credentials section.
+    /// Can be specified multiple times.
+    #[arg(long, value_name = "SERVICE")]
+    pub proxy_credential: Vec<String>,
+
+    /// Chain through an external (enterprise) proxy.
+    /// Format: host:port (e.g., squid.corp.internal:3128)
+    #[arg(long, value_name = "HOST:PORT")]
+    pub external_proxy: Option<String>,
+
     // === Command blocking ===
     /// Allow a normally-blocked dangerous command (use with caution).
     /// By default, destructive commands like rm, dd, chmod are blocked.
@@ -239,13 +261,13 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "CMD")]
     pub block_command: Vec<String>,
 
-    // === Secrets options ===
-    /// Load secrets from system keystore and inject as environment variables.
-    /// Use with --profile to load secrets defined in the profile's [secrets] section,
-    /// or specify comma-separated account names to load from the 'nono' service.
-    /// Secrets are loaded before sandbox is applied and zeroized from memory after exec.
+    // === Credential options ===
+    /// Load credentials from system keystore and inject as environment variables.
+    /// The sandboxed process can read these credentials directly.
+    /// For network API keys, prefer --proxy-credential for credential isolation.
+    /// Specify comma-separated account names to load from the 'nono' keyring service.
     #[arg(long, value_name = "ACCOUNTS")]
-    pub secrets: Option<String>,
+    pub env_credential: Option<String>,
 
     // === Profile options ===
     /// Use a profile by name or file path.

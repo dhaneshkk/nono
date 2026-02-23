@@ -1,0 +1,283 @@
+---
+title: Network Filtering and Credential Injection
+description: Host-level network filtering and credential injection for sandboxed processes
+---
+
+nono's network proxy provides host-level filtering for outbound connections. The proxy lets you specify exactly which hosts the sandboxed process can reach, while keeping API credentials out of the sandbox entirely.
+
+## Why a Proxy?
+
+Originally nono used OS-level sandboxing (Landlock on Linux, Seatbelt on macOS) to provide a binary "switch" for outbound network access. The child process was either allowed to connect to any host on any port, or blocked from making any outbound connections at all.
+
+```bash
+# Everything allowed (default)
+nono run --allow-cwd -- my-agent
+
+# Everything blocked
+nono run --allow-cwd --net-block -- my-agent
+```
+
+However, AI agents need something in between. They need to reach specific APIs (OpenAI, Anthropic, GitHub) while being blocked from:
+
+- **Cloud metadata endpoints** (169.254.169.254) - credential theft
+- **Internal networks** (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) - lateral movement
+- **Arbitrary hosts** - data exfiltration
+
+The proxy provides this. It also supports **credential injection** so API keys never enter the sandboxed process and can remain protected by a secure keystore.
+
+## Quick Start
+
+### Host Filtering Only
+
+```bash
+# Allow only specific hosts
+nono run --allow-cwd --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+```
+
+### Using a Network Profile
+
+```bash
+# Use a predefined set of allowed hosts
+nono run --allow-cwd --network-profile claude-code -- claude
+```
+
+### With Credential Injection
+
+```bash
+# Store credentials in keystore first
+security add-generic-password -s "nono-proxy" -a "openai" -w "sk-..."  # macOS
+
+# Run with credential injection
+nono run --allow-cwd --network-profile claude-code --proxy-credential openai -- my-agent
+```
+
+The agent connects to `http://localhost:<port>/openai/v1/chat/completions` and the proxy forwards to `https://api.openai.com/v1/chat/completions` with the real API key injected. The agent never sees the key.
+
+## How It Works
+
+When proxy mode is active, nono:
+
+1. Starts an HTTP proxy on a random localhost port
+2. Sandboxes the child to only connect to `localhost:<port>` (all other outbound blocked)
+3. Sets `HTTP_PROXY` and `HTTPS_PROXY` in the child's environment
+4. Filters all connections through the proxy
+
+```
+Child Process (sandboxed)
+  |
+  | HTTP CONNECT api.openai.com:443
+  v
+nono proxy (localhost:PORT, unsandboxed)
+  |
+  | 1. Validate session token
+  | 2. Check host against allowlist
+  | 3. Check resolved IPs against deny CIDRs
+  | 4. If allowed: connect and relay
+  v
+api.openai.com:443 (upstream)
+```
+
+The proxy runs in the unsandboxed parent process. The sandbox is applied only to the child, which is restricted to `ProxyOnly` mode (only `localhost:<port>` is reachable).
+
+### Session Token
+
+Every proxy session generates a random 256-bit token. The child must include this token in every request (`Proxy-Authorization` header for CONNECT, `X-Nono-Token` for reverse proxy). This prevents other localhost processes from using the proxy.
+
+### DNS Rebinding Protection
+
+The proxy resolves DNS itself and checks all resolved IP addresses against the deny list before connecting. This prevents attacks where a malicious DNS server maps an allowed hostname to an internal IP address.
+
+## Proxy Modes
+
+### Mode 1: CONNECT Tunnel (Host Filtering)
+
+Standard HTTP CONNECT proxying. The proxy validates the target host and establishes a raw TCP tunnel. TLS is end-to-end between the client and upstream -- the proxy never sees plaintext.
+
+This is what `HTTP_PROXY`/`HTTPS_PROXY` uses. Most HTTP libraries, curl, and language runtimes support it natively.
+
+```bash
+nono run --allow-cwd --proxy-allow api.openai.com -- curl https://api.openai.com/v1/models
+```
+
+### Mode 2: Reverse Proxy (Credential Injection)
+
+For routes with credentials configured, the proxy acts as a reverse proxy. The agent sends plain HTTP to `localhost:<port>/<service>/...` and the proxy:
+
+1. Strips the service prefix
+2. Injects the real credential as an HTTP header
+3. Forwards to the upstream over TLS
+4. Streams the response back
+
+```bash
+# Agent sees: OPENAI_BASE_URL=http://127.0.0.1:PORT/openai
+# Agent sends: POST http://127.0.0.1:PORT/openai/v1/chat/completions
+# Proxy sends: POST https://api.openai.com/v1/chat/completions
+#              Authorization: Bearer sk-... (injected from keystore)
+```
+
+Streaming responses (SSE for chat completions, MCP Streamable HTTP, A2A JSON-RPC) are forwarded without buffering.
+
+### Mode 3: External Proxy Passthrough (Enterprise)
+
+For corporate environments with a mandatory outbound proxy:
+
+```bash
+nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
+```
+
+CONNECT requests are chained through the corporate proxy. The default deny list (cloud metadata, RFC1918) is still enforced as a floor.
+
+## Network Profiles
+
+Network profiles are composable groups of allowed hosts, similar to filesystem policy groups. They're defined in `network-policy.json` (embedded in the binary).
+
+### Built-in Profiles
+
+| Profile | Groups | Use Case |
+|---------|--------|----------|
+| `claude-code` | LLM APIs, package registries, GitHub, Sigstore, docs | Claude Code agent |
+| `minimal` | LLM APIs only | Minimal API access |
+| `enterprise` | All groups + cloud provider suffixes | Corporate environments |
+
+### Groups
+
+| Group | Hosts |
+|-------|-------|
+| `llm_apis` | api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, ... |
+| `package_registries` | registry.npmjs.org, pypi.org, crates.io, ... |
+| `github` | github.com, api.github.com, raw.githubusercontent.com, ... |
+| `sigstore` | fulcio.sigstore.dev, rekor.sigstore.dev, tuf-repo-cdn.sigstore.dev |
+| `documentation` | docs.python.org, developer.mozilla.org, doc.rust-lang.org, ... |
+| `google_cloud` | *.googleapis.com, *.google.com |
+| `azure` | *.azure.com, *.microsoft.com |
+| `aws_bedrock` | *.amazonaws.com |
+
+### Custom Profiles
+
+User profiles can specify a network profile in the `network` section:
+
+```json
+{
+  "meta": { "name": "my-agent" },
+  "filesystem": {
+    "allow": ["$WORKDIR"]
+  },
+  "network": {
+    "network_profile": "claude-code",
+    "proxy_allow": ["my-internal-api.example.com"],
+    "proxy_credentials": ["openai", "anthropic"]
+  }
+}
+```
+
+## Default Deny List
+
+The following destinations are always blocked, regardless of configuration. These cannot be overridden.
+
+### Cloud Metadata
+
+| Host/CIDR | Service |
+|-----------|---------|
+| 169.254.169.254 | AWS/GCP/Azure instance metadata |
+| metadata.google.internal | GCP metadata alias |
+
+### Private Networks
+
+| CIDR | Range |
+|------|-------|
+| 10.0.0.0/8 | RFC1918 Class A |
+| 172.16.0.0/12 | RFC1918 Class B |
+| 192.168.0.0/16 | RFC1918 Class C |
+| 169.254.0.0/16 | Link-local |
+| 127.0.0.0/8 | Loopback (except proxy port) |
+| ::1/128 | IPv6 loopback |
+| fc00::/7 | IPv6 unique local |
+| fe80::/10 | IPv6 link-local |
+
+## Credential Injection
+
+Credential injection keeps API keys out of the sandboxed process entirely. The agent sees a local HTTP URL and the proxy handles authentication transparently.
+
+### Storing Credentials
+
+Credentials are stored in the system keyring under the service name `nono-proxy`:
+
+**macOS:**
+```bash
+security add-generic-password -s "nono-proxy" -a "openai" -w "sk-..."
+security add-generic-password -s "nono-proxy" -a "anthropic" -w "sk-ant-..."
+```
+
+**Linux:**
+```bash
+secret-tool store --label="nono-proxy: openai" service nono-proxy username openai
+secret-tool store --label="nono-proxy: anthropic" service nono-proxy username anthropic
+```
+
+### Environment Variables
+
+When credential routes are configured, the proxy sets SDK-specific base URL environment variables:
+
+| Route | Environment Variable | Value |
+|-------|---------------------|-------|
+| openai | `OPENAI_BASE_URL` | `http://127.0.0.1:<port>/openai` |
+| anthropic | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<port>/anthropic` |
+
+Most LLM SDKs (OpenAI Python, Anthropic Python, etc.) respect these variables and redirect API calls through the proxy automatically.
+
+### Credential Route Configuration
+
+The built-in `network-policy.json` defines default credential routes:
+
+| Service | Upstream | Header | Format |
+|---------|----------|--------|--------|
+| openai | https://api.openai.com | Authorization | Bearer {} |
+| anthropic | https://api.anthropic.com | x-api-key | {} |
+
+## Platform Behavior
+
+### Linux
+
+Network filtering uses Landlock V4+ per-port TCP rules. The sandbox restricts `connect()` to only the proxy port. All other outbound TCP is blocked at the kernel level.
+
+**Requirements:** Landlock ABI v4+ (Linux 6.7+)
+
+### macOS
+
+Network filtering uses Seatbelt rules. The sandbox allows only `(remote tcp "localhost:PORT")` and denies all other network operations.
+
+```scheme
+(deny network*)
+(allow network-outbound (remote tcp "localhost:PORT"))
+(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))
+(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))
+```
+
+## Audit Logging
+
+All proxy decisions are logged via `tracing`:
+
+```
+ALLOW CONNECT api.openai.com:443
+DENY  CONNECT 169.254.169.254:80 reason=denied_cidr
+ALLOW REVERSE openai POST /v1/chat/completions -> 200
+```
+
+Enable verbose logging to see proxy decisions:
+
+```bash
+nono run -vv --network-profile claude-code --allow-cwd -- my-agent
+```
+
+## Limitations
+
+- **HTTP/1.1 only** - The CONNECT tunnel passes raw bytes (HTTP/2 works end-to-end), but the reverse proxy mode speaks HTTP/1.1 to upstream
+- **No per-port filtering on macOS** - Seatbelt cannot filter outbound by destination port (only ProxyOnly mode is supported, not arbitrary per-port rules)
+- **Proxy mode requires supervised execution** - The proxy runs in the unsandboxed parent process, so `--exec` mode is incompatible
+
+## Next Steps
+
+- [CLI Reference](/cli/usage/flags) - Complete flag documentation including network flags
+- [Secrets Management](/cli/features/secrets) - Storing credentials in the system keystore
+- [Supervisor Mode](/cli/features/supervisor) - How supervised execution works
+- [Security Model](/cli/internals/security-model) - Platform sandbox internals

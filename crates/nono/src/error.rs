@@ -153,6 +153,10 @@ pub enum NonoError {
     #[error("Instruction file denied: {path}: {reason}")]
     InstructionFileDenied { path: String, reason: String },
 
+    // Network errors
+    #[error("Per-port network filtering not supported on {platform}: {reason}")]
+    NetworkFilterUnsupported { platform: String, reason: String },
+
     // I/O errors
     #[error("I/O error: {0}")]
     Io(std::io::Error),

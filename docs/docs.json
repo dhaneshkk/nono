@@ -42,6 +42,7 @@
           "cli/features/atomic-rollbacks",
           "cli/features/audit",
           "cli/features/supervisor",
+          "cli/features/network-proxy",
           "cli/features/execution-modes",
           "cli/features/learn",
           "cli/features/trust"
