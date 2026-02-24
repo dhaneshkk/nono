@@ -33,9 +33,6 @@ AI agents get filesystem access, run shell commands, and are inherently open to 
 
 Kernel-enforced sandboxing (Landlock/Seatbelt) blocks unauthorized access at the syscall level. Every filesystem change gets a rollback snapshot with integrity protection. Destructive commands are denied before they run. Secrets are injected without touching disk. When the agent needs access outside its permissions, a kernel-mediated supervisor intercepts the syscall via seccomp BPF, opens the file after user approval, and injects only the file descriptor — the agent never executes its own `open()`. No root or `CAP_SYS_ADMIN` required. Runs on any Linux kernel 5.13+ — bare metal, containers(Docker,Podman,K8s), Firecracker, Kata.
 
-> *"nono, so secure, Chuck Norris tried to break out, but gave up and went home."* — Chuck Norris (allegedly)
-
-> 
 ## CLI
 
 The CLI builds on the library to provide a ready-to-use sandboxing tool, popular with coding-agents, with built-in profiles, policy groups, and interactive UX.
@@ -240,6 +237,48 @@ nono audit show 20260216-193311-20751 --json
     "/Users/jsmith/project"
   ]
 }
+```
+
+### Network Filtering Proxy (Coming Soon!)
+
+A micro HTTP proxy in the supervisor provides allowlist-based host filtering with optional credential injection. The sandbox blocks all direct outbound connections except to the local proxy — the agent can only reach explicitly allowed hosts. A hardcoded deny list blocks cloud metadata endpoints (169.254.169.254) and private network ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) regardless of allowlist configuration. DNS rebinding protection resolves hostnames and checks all resulting IPs against the deny list before connecting.
+
+```bash
+# Allow specific hosts via CONNECT tunnel
+nono run --supervised --proxy-allow api.openai.com --proxy-allow api.anthropic.com -- my-agent
+
+# Use a predefined network profile
+nono run --supervised --network-profile claude-code -- claude
+```
+
+### Credential Injection (Coming Soon!)
+
+For configured services, the network proxy can load credentials from the system keyring and inject them into outbound requests via reverse-proxy mode. The agent never sees real API keys — it connects to `localhost` paths like `/openai/v1/chat` and the proxy adds the `Authorization` header transparently. Credentials stay in the unsandboxed supervisor process and are never exposed to the sandboxed child's environment or memory.
+
+```bash
+# Proxy injects API key from keyring; agent sees http://localhost:PORT/openai
+nono run --supervised \
+  --network-profile claude-code \
+  --proxy-credential openai \
+  -- my-agent
+```
+
+### Instruction File Attestation (Coming Soon!)
+
+Instruction files (SKILLS.md, CLAUDE.md, AGENT.MD) are a supply chain attack vector — a compromised file can inject malicious directives into an agent's session. nono cryptographically verifies these files before the agent reads them using Sigstore-based attestation. Files are signed with DSSE envelopes and in-toto statements, supporting both keyed signing (private key in system keystore) and keyless signing (OIDC identity via GitHub Actions + Fulcio + Rekor transparency log). A trust policy defines which publishers are trusted, a blocklist of known-malicious digests, and enforcement mode (deny/warn/audit). On macOS, Seatbelt deny rules block unverified instruction files at the kernel level. On Linux, seccomp-notify intercepts reads at runtime.
+
+```bash
+# Generate a signing key
+nono trust keygen --id my-signing-key
+
+# Sign an instruction file
+nono trust sign SKILLS.md --key my-signing-key
+
+# Verify all instruction files in current directory
+nono trust verify --all
+
+# Run with attestation enforcement
+nono run --profile claude-code -- claude
 ```
 
 ## Quick Start
