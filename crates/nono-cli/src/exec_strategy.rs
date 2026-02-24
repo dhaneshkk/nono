@@ -148,6 +148,8 @@ pub struct ExecConfig<'a> {
     pub no_diagnostics: bool,
     /// Threading context for fork safety validation.
     pub threading: ThreadingContext,
+    /// Paths that are write-protected (signed instruction files).
+    pub protected_paths: &'a [std::path::PathBuf],
 }
 
 /// Configuration for supervisor IPC in supervised execution mode.
@@ -939,7 +941,8 @@ pub fn execute_supervised(
                 };
                 let formatter = DiagnosticFormatter::new(config.caps)
                     .with_mode(mode)
-                    .with_denials(&denials);
+                    .with_denials(&denials)
+                    .with_protected_paths(config.protected_paths);
                 let footer = formatter.format_footer(exit_code);
                 eprintln!("\n{}", footer);
             }
@@ -1017,6 +1020,8 @@ fn execute_parent_monitor(
     // We need threads because we must read from both pipes while also waiting for the child
     let caps_stdout = config.caps.clone();
     let caps_stderr = config.caps.clone();
+    let protected_stdout = config.protected_paths.to_vec();
+    let protected_stderr = config.protected_paths.to_vec();
     let no_diagnostics = config.no_diagnostics;
     let diag_flag_stdout = Arc::clone(&diagnostic_injected);
     let diag_flag_stderr = Arc::clone(&diagnostic_injected);
@@ -1025,6 +1030,7 @@ fn execute_parent_monitor(
         process_output(
             stdout_pipe,
             &caps_stdout,
+            &protected_stdout,
             no_diagnostics,
             false,
             diag_flag_stdout,
@@ -1035,6 +1041,7 @@ fn execute_parent_monitor(
         process_output(
             stderr_pipe,
             &caps_stderr,
+            &protected_stderr,
             no_diagnostics,
             true,
             diag_flag_stderr,
@@ -1076,7 +1083,8 @@ fn execute_parent_monitor(
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     {
-        let formatter = DiagnosticFormatter::new(config.caps);
+        let formatter =
+            DiagnosticFormatter::new(config.caps).with_protected_paths(config.protected_paths);
         let footer = formatter.format_footer(exit_code);
         eprintln!("\n{}", footer);
     }
@@ -1092,6 +1100,7 @@ fn execute_parent_monitor(
 fn process_output(
     pipe: std::fs::File,
     caps: &CapabilitySet,
+    protected_paths: &[std::path::PathBuf],
     no_diagnostics: bool,
     is_stderr: bool,
     diagnostic_injected: Arc<AtomicBool>,
@@ -1136,10 +1145,15 @@ fn process_output(
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                // Check if the error mentions a protected file
+                let blocked_file = detect_protected_file_in_line(&line, protected_paths);
+
                 // We won the race - inject diagnostic to stdout only
                 // Writing to stdout ensures AI agents (like Claude Code) see the diagnostic
                 // since they may capture and re-render subprocess output through their TUI
-                let formatter = DiagnosticFormatter::new(caps);
+                let formatter = DiagnosticFormatter::new(caps)
+                    .with_protected_paths(protected_paths)
+                    .with_blocked_protected_file(blocked_file);
                 let footer = formatter.format_footer(1);
 
                 // Write to stdout (for agents that capture stdout)
@@ -1159,6 +1173,21 @@ fn process_output(
             }
         }
     }
+}
+
+/// Check if an error line mentions any protected file and return the filename.
+fn detect_protected_file_in_line(
+    line: &str,
+    protected_paths: &[std::path::PathBuf],
+) -> Option<String> {
+    for path in protected_paths {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if line.contains(name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Wait for child process, handling EINTR from signals.
@@ -1497,6 +1526,7 @@ fn run_supervisor_loop(
                         initial_caps,
                         &mut rate_limiter,
                         &mut denials,
+                        trust_interceptor.as_mut(),
                     ) {
                         debug!("Error handling seccomp notification: {}", e);
                     }

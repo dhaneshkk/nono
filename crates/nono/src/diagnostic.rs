@@ -58,6 +58,10 @@ pub struct DiagnosticFormatter<'a> {
     caps: &'a CapabilitySet,
     mode: DiagnosticMode,
     denials: &'a [DenialRecord],
+    /// Paths that are write-protected due to trust verification
+    protected_paths: &'a [PathBuf],
+    /// Name of a protected file that was detected in the error output
+    blocked_protected_file: Option<String>,
 }
 
 impl<'a> DiagnosticFormatter<'a> {
@@ -68,6 +72,8 @@ impl<'a> DiagnosticFormatter<'a> {
             caps,
             mode: DiagnosticMode::Standard,
             denials: &[],
+            protected_paths: &[],
+            blocked_protected_file: None,
         }
     }
 
@@ -83,6 +89,42 @@ impl<'a> DiagnosticFormatter<'a> {
     pub fn with_denials(mut self, denials: &'a [DenialRecord]) -> Self {
         self.denials = denials;
         self
+    }
+
+    /// Add paths that are write-protected due to trust verification.
+    ///
+    /// These are signed instruction files that the sandbox protects from
+    /// modification even when the parent directory has write access.
+    #[must_use]
+    pub fn with_protected_paths(mut self, paths: &'a [PathBuf]) -> Self {
+        self.protected_paths = paths;
+        self
+    }
+
+    /// Set the name of a protected file that was detected in the error output.
+    ///
+    /// When set, the diagnostic will highlight that a write to a signed
+    /// instruction file was blocked.
+    #[must_use]
+    pub fn with_blocked_protected_file(mut self, name: Option<String>) -> Self {
+        self.blocked_protected_file = name;
+        self
+    }
+
+    /// Check if an error line mentions any protected file and return the filename.
+    ///
+    /// This is used by the output processor to detect when a permission error
+    /// is specifically due to a signed instruction file being write-protected.
+    #[must_use]
+    pub fn detect_protected_file_in_error(&self, error_line: &str) -> Option<String> {
+        for path in self.protected_paths {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if error_line.contains(name) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Format the diagnostic footer for a failed command.
@@ -101,28 +143,45 @@ impl<'a> DiagnosticFormatter<'a> {
     fn format_standard_footer(&self, exit_code: i32) -> String {
         let mut lines = Vec::new();
 
-        lines.push(format!(
-            "[nono] Command exited with code {}. This may be due to sandbox restrictions.",
-            exit_code
-        ));
+        // Check if this was a protected file write attempt
+        if let Some(ref blocked_file) = self.blocked_protected_file {
+            lines.push(format!(
+                "[nono] Write to '{}' blocked: file is a signed instruction file.",
+                blocked_file
+            ));
+            lines.push(
+                "[nono] Signed instruction files are write-protected to prevent tampering."
+                    .to_string(),
+            );
+            lines.push("[nono]".to_string());
+            lines.push(format!("[nono] Command exited with code {}.", exit_code));
+        } else {
+            lines.push(format!(
+                "[nono] Command exited with code {}. This may be due to sandbox restrictions.",
+                exit_code
+            ));
+        }
         lines.push("[nono]".to_string());
 
         // Concise policy summary: show user paths, summarize system/group paths
         lines.push("[nono] Sandbox policy:".to_string());
         self.format_allowed_paths_concise(&mut lines);
         self.format_network_status(&mut lines);
+        self.format_protected_paths(&mut lines);
 
-        // Help section
-        lines.push("[nono]".to_string());
-        lines.push("[nono] To grant additional access, re-run with:".to_string());
-        lines.push("[nono]   --allow <path>     read+write access to directory".to_string());
-        lines.push("[nono]   --read <path>      read-only access to directory".to_string());
-        lines.push("[nono]   --write <path>     write-only access to directory".to_string());
+        // Help section (skip if the failure was specifically due to protected file)
+        if self.blocked_protected_file.is_none() {
+            lines.push("[nono]".to_string());
+            lines.push("[nono] To grant additional access, re-run with:".to_string());
+            lines.push("[nono]   --allow <path>     read+write access to directory".to_string());
+            lines.push("[nono]   --read <path>      read-only access to directory".to_string());
+            lines.push("[nono]   --write <path>     write-only access to directory".to_string());
 
-        if self.caps.is_network_blocked() {
-            lines.push(
-                "[nono]   --allow-net        network access (remove --net-block)".to_string(),
-            );
+            if self.caps.is_network_blocked() {
+                lines.push(
+                    "[nono]   --allow-net        network access (remove --net-block)".to_string(),
+                );
+            }
         }
 
         lines.join("\n")
@@ -145,6 +204,7 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono] Sandbox policy:".to_string());
             self.format_allowed_paths_concise(&mut lines);
             self.format_network_status(&mut lines);
+            self.format_protected_paths(&mut lines);
             lines.push("[nono]".to_string());
             lines.push("[nono] To grant additional access, re-run with:".to_string());
             lines.push("[nono]   --allow <path>     read+write access to directory".to_string());
@@ -304,6 +364,23 @@ impl<'a> DiagnosticFormatter<'a> {
             lines.push("[nono]   Network: blocked".to_string());
         } else {
             lines.push("[nono]   Network: allowed".to_string());
+        }
+    }
+
+    /// Format write-protected paths (signed instruction files).
+    fn format_protected_paths(&self, lines: &mut Vec<String>) {
+        if self.protected_paths.is_empty() {
+            return;
+        }
+
+        lines.push("[nono]   Write-protected (signed instruction files):".to_string());
+        for path in self.protected_paths {
+            // Show just the filename for brevity
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            lines.push(format!("[nono]     {}", name));
         }
     }
 
@@ -699,5 +776,45 @@ mod tests {
 
         assert!(output.contains("/tmp/flood"));
         assert!(output.contains("denied"));
+    }
+
+    // --- Protected paths tests ---
+
+    #[test]
+    fn test_protected_paths_shown_in_footer() {
+        let caps = make_test_caps();
+        let protected = vec![
+            PathBuf::from("/project/SKILLS.md"),
+            PathBuf::from("/project/helper.py"),
+        ];
+        let formatter = DiagnosticFormatter::new(&caps).with_protected_paths(&protected);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("Write-protected"));
+        assert!(output.contains("SKILLS.md"));
+        assert!(output.contains("helper.py"));
+    }
+
+    #[test]
+    fn test_protected_paths_empty_no_section() {
+        let caps = make_test_caps();
+        let formatter = DiagnosticFormatter::new(&caps).with_protected_paths(&[]);
+        let output = formatter.format_footer(1);
+
+        assert!(!output.contains("Write-protected"));
+    }
+
+    #[test]
+    fn test_protected_paths_shown_in_supervised_macos_fallback() {
+        // macOS supervised mode (no extensions) falls back to standard policy format
+        let caps = make_test_caps(); // extensions_enabled defaults to false
+        let protected = vec![PathBuf::from("/project/config.json")];
+        let formatter = DiagnosticFormatter::new(&caps)
+            .with_mode(DiagnosticMode::Supervised)
+            .with_protected_paths(&protected);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("Write-protected"));
+        assert!(output.contains("config.json"));
     }
 }

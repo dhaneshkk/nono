@@ -43,7 +43,7 @@ The DSSE payload is an [in-toto v1 attestation statement](https://github.com/in-
       }
     }
   ],
-  "predicateType": "https://nono.dev/attestation/instruction-file/v1",
+  "predicateType": "https://nono.sh/attestation/instruction-file/v1",
   "predicate": {
     "version": 1,
     "signer": {
@@ -54,7 +54,7 @@ The DSSE payload is an [in-toto v1 attestation statement](https://github.com/in-
 }
 ```
 
-The `subject` binds the statement to a specific file by name and SHA-256 digest. The `predicateType` identifies this as a nono instruction file attestation. Trust policy signatures use a separate predicate type: `https://nono.dev/attestation/trust-policy/v1`.
+The `subject` binds the statement to a specific file by name and SHA-256 digest. The `predicateType` identifies this as a nono instruction file attestation. Trust policy signatures use a separate predicate type: `https://nono.sh/attestation/trust-policy/v1`.
 
 For keyless signing, the predicate carries OIDC provenance:
 
@@ -174,7 +174,7 @@ If any component of the cache key changes (file modified, replaced, moved), the 
 
 The trust policy itself must be signed to establish a root of trust. Without this, an attacker who can write to the project directory can modify `trust-policy.json` to add themselves as a publisher or weaken enforcement.
 
-Policy bundles use the predicate type `https://nono.dev/attestation/trust-policy/v1` to distinguish them from instruction file bundles.
+Policy bundles use the predicate type `https://nono.sh/attestation/trust-policy/v1` to distinguish them from instruction file bundles.
 
 During pre-exec scan, policy signature verification runs first:
 

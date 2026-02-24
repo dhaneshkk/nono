@@ -3,8 +3,8 @@
 //! Implements `nono trust sign|verify|list|keygen` subcommands.
 
 use crate::cli::{
-    TrustArgs, TrustCommands, TrustKeygenArgs, TrustListArgs, TrustSignArgs, TrustSignPolicyArgs,
-    TrustVerifyArgs,
+    TrustArgs, TrustCommands, TrustExportKeyArgs, TrustKeygenArgs, TrustListArgs, TrustSignArgs,
+    TrustSignPolicyArgs, TrustVerifyArgs,
 };
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
@@ -28,6 +28,7 @@ pub fn run_trust(args: TrustArgs) -> Result<()> {
         TrustCommands::Verify(verify_args) => run_verify(verify_args),
         TrustCommands::List(list_args) => run_list(list_args),
         TrustCommands::Keygen(keygen_args) => run_keygen(keygen_args),
+        TrustCommands::ExportKey(export_args) => run_export_key(export_args),
     }
 }
 
@@ -97,6 +98,24 @@ fn run_keygen(args: TrustKeygenArgs) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// export-key
+// ---------------------------------------------------------------------------
+
+fn run_export_key(args: TrustExportKeyArgs) -> Result<()> {
+    let key_id = &args.id;
+    let pub_key_bytes = load_public_key_bytes(key_id)?;
+
+    if args.pem {
+        let pub_key = trust::DerPublicKey::from(pub_key_bytes);
+        print!("{}", pub_key.to_pem());
+    } else {
+        println!("{}", base64_encode(&pub_key_bytes));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // sign
 // ---------------------------------------------------------------------------
 
@@ -116,6 +135,11 @@ fn run_sign(args: TrustSignArgs) -> Result<()> {
     if files.is_empty() {
         eprintln!("No instruction files found to sign.");
         return Ok(());
+    }
+
+    // Multi-file: produce a single .nono-trust.bundle with all subjects
+    if files.len() > 1 {
+        return run_sign_multi_keyed(&files, &key_pair, key_id);
     }
 
     let mut success_count = 0u32;
@@ -164,6 +188,49 @@ fn run_sign(args: TrustSignArgs) -> Result<()> {
     Ok(())
 }
 
+/// Sign multiple files into a single multi-subject bundle (keyed).
+fn run_sign_multi_keyed(files: &[PathBuf], key_pair: &trust::KeyPair, key_id: &str) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+
+    // Compute digests for all files
+    let mut file_pairs = Vec::with_capacity(files.len());
+    for file_path in files {
+        let digest = trust::file_digest(file_path).map_err(|e| nono::NonoError::TrustSigning {
+            path: file_path.display().to_string(),
+            reason: format!("failed to compute digest: {e}"),
+        })?;
+        // Use relative path as subject name when possible
+        let name = file_path.strip_prefix(&cwd).unwrap_or(file_path);
+        file_pairs.push((name.to_path_buf(), digest));
+    }
+
+    let bundle_json = trust::sign_files(&file_pairs, key_pair, key_id)?;
+
+    // Write to .nono-trust.bundle in CWD
+    let bundle_path = trust::multi_subject_bundle_path(&cwd);
+    std::fs::write(&bundle_path, &bundle_json).map_err(|e| nono::NonoError::TrustSigning {
+        path: bundle_path.display().to_string(),
+        reason: format!("failed to write bundle: {e}"),
+    })?;
+
+    for file_path in files {
+        let rel = file_path.strip_prefix(&cwd).unwrap_or(file_path);
+        eprintln!("  {} {}", "SIGNED".green(), rel.display());
+    }
+    eprintln!();
+    eprintln!(
+        "{}",
+        format!(
+            "Signed {} file(s) into {} successfully.",
+            files.len(),
+            bundle_path.display()
+        )
+        .green()
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // keyless sign (Sigstore Fulcio + Rekor)
 // ---------------------------------------------------------------------------
@@ -190,6 +257,11 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
 
     let context = sigstore_sign::SigningContext::production();
     let signer = context.signer(token);
+
+    // Multi-file: produce a single .nono-trust.bundle with all subjects
+    if files.len() > 1 {
+        return rt.block_on(run_sign_multi_keyless(&files, &signer));
+    }
 
     let mut success_count = 0u32;
     let mut fail_count = 0u32;
@@ -232,6 +304,74 @@ fn run_sign_keyless(args: TrustSignArgs) -> Result<()> {
             reason: format!("{fail_count} file(s) failed to sign"),
         });
     }
+
+    Ok(())
+}
+
+/// Sign multiple files into a single multi-subject bundle (keyless via Fulcio + Rekor).
+async fn run_sign_multi_keyless(files: &[PathBuf], signer: &sigstore_sign::Signer) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+    let signer_predicate = build_keyless_predicate();
+
+    let mut attestation =
+        sigstore_sign::Attestation::new(trust::NONO_MULTI_SUBJECT_PREDICATE_TYPE, signer_predicate);
+
+    for file_path in files {
+        let content = std::fs::read(file_path).map_err(|e| nono::NonoError::TrustSigning {
+            path: file_path.display().to_string(),
+            reason: format!("failed to read file: {e}"),
+        })?;
+        let digest_hex = trust::bytes_digest(&content);
+        let digest_hash = sigstore_sign::types::Sha256Hash::from_hex(&digest_hex).map_err(|e| {
+            nono::NonoError::TrustSigning {
+                path: file_path.display().to_string(),
+                reason: format!("failed to parse digest: {e}"),
+            }
+        })?;
+        let name = file_path
+            .strip_prefix(&cwd)
+            .unwrap_or(file_path)
+            .display()
+            .to_string();
+        attestation = attestation.add_subject(name, digest_hash);
+    }
+
+    let bundle =
+        signer
+            .sign_attestation(attestation)
+            .await
+            .map_err(|e| nono::NonoError::TrustSigning {
+                path: String::new(),
+                reason: format!("keyless signing failed: {e}"),
+            })?;
+
+    let bundle_json = bundle
+        .to_json_pretty()
+        .map_err(|e| nono::NonoError::TrustSigning {
+            path: String::new(),
+            reason: format!("failed to serialize bundle: {e}"),
+        })?;
+
+    let bundle_path = trust::multi_subject_bundle_path(&cwd);
+    std::fs::write(&bundle_path, &bundle_json).map_err(|e| nono::NonoError::TrustSigning {
+        path: bundle_path.display().to_string(),
+        reason: format!("failed to write bundle: {e}"),
+    })?;
+
+    for file_path in files {
+        let rel = file_path.strip_prefix(&cwd).unwrap_or(file_path);
+        eprintln!("  {} {}", "SIGNED".green(), rel.display());
+    }
+    eprintln!();
+    eprintln!(
+        "{}",
+        format!(
+            "Signed {} file(s) into {} successfully (keyless).",
+            files.len(),
+            bundle_path.display()
+        )
+        .green()
+    );
 
     Ok(())
 }
@@ -366,18 +506,69 @@ fn run_sign_policy(args: TrustSignPolicyArgs) -> Result<()> {
 fn run_verify(args: TrustVerifyArgs) -> Result<()> {
     let policy = load_trust_policy(args.policy.as_deref())?;
 
-    // Resolve files to verify
-    let files = resolve_files(&args.files, args.all, None)?;
+    // Check if user passed a .nono-trust.bundle directly
+    let mut multi_bundles: Vec<PathBuf> = Vec::new();
+    let mut single_files: Vec<PathBuf> = Vec::new();
 
-    if files.is_empty() {
-        eprintln!("No instruction files found to verify.");
+    for f in &args.files {
+        if f.file_name().and_then(|n| n.to_str()) == Some(".nono-trust.bundle") {
+            multi_bundles.push(f.clone());
+        } else {
+            single_files.push(f.clone());
+        }
+    }
+
+    // Resolve single instruction files (pass policy to avoid reloading)
+    let files = resolve_files_with_policy(&single_files, args.all, &policy)?;
+
+    // When --all, also check for .nono-trust.bundle in CWD
+    if args.all {
+        let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+        let multi_path = trust::multi_subject_bundle_path(&cwd);
+        if multi_path.exists() {
+            multi_bundles.push(multi_path);
+        }
+    }
+
+    if files.is_empty() && multi_bundles.is_empty() {
+        eprintln!("No instruction files or multi-subject bundles found to verify.");
         return Ok(());
     }
 
     let mut verified = 0u32;
     let mut failed = 0u32;
 
+    // Verify multi-subject bundles first to collect covered paths
+    let mut multi_verified_paths: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
+
+    for bundle_path in &multi_bundles {
+        let scan_root = bundle_path.parent().unwrap_or_else(|| Path::new("."));
+        match verify_multi_subject_file(bundle_path, scan_root, &policy) {
+            Ok(subjects) => {
+                for (name, signer) in &subjects {
+                    eprintln!("  {} {} (signer: {})", "VERIFIED".green(), name, signer);
+                    verified = verified.saturating_add(1);
+                    // Track the canonical path so per-file check can skip it
+                    let subject_path = scan_root.join(name);
+                    if let Ok(canon) = std::fs::canonicalize(&subject_path) {
+                        multi_verified_paths.insert(canon);
+                    }
+                }
+            }
+            Err(reason) => {
+                eprintln!("  {} {}", "FAILED".red(), bundle_path.display());
+                eprintln!("    Reason: {reason}");
+                failed = failed.saturating_add(1);
+            }
+        }
+    }
+
+    // Verify per-file bundles, skipping files already verified via multi-subject
     for file_path in &files {
+        if multi_verified_paths.contains(file_path) {
+            continue;
+        }
         match verify_single_file(file_path, &policy) {
             Ok(info) => {
                 eprintln!("  {} {}", "VERIFIED".green(), file_path.display());
@@ -413,6 +604,100 @@ fn run_verify(args: TrustVerifyArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Verify a `.nono-trust.bundle` multi-subject bundle.
+///
+/// Returns `Ok(Vec<(subject_name, signer_info)>)` on success, or an error string.
+fn verify_multi_subject_file(
+    bundle_path: &Path,
+    scan_root: &Path,
+    policy: &trust::TrustPolicy,
+) -> std::result::Result<Vec<(String, String)>, String> {
+    let bundle = trust::load_bundle(bundle_path).map_err(|e| format!("invalid bundle: {e}"))?;
+
+    // Validate predicate type
+    let predicate_type = trust::extract_predicate_type(&bundle, bundle_path)
+        .map_err(|e| format!("failed to extract predicate type: {e}"))?;
+    if predicate_type != trust::NONO_MULTI_SUBJECT_PREDICATE_TYPE {
+        return Err(format!(
+            "wrong bundle type: expected multi-file attestation, got {predicate_type}"
+        ));
+    }
+
+    // Extract signer identity
+    let identity = trust::extract_signer_identity(&bundle, bundle_path)
+        .map_err(|e| format!("no signer identity: {e}"))?;
+
+    // Check publisher match
+    let matching = policy.matching_publishers(&identity);
+    if matching.is_empty() {
+        return Err(format!(
+            "signer '{}' not in trusted publishers",
+            format_identity(&identity)
+        ));
+    }
+
+    // Cryptographic verification
+    match &identity {
+        trust::SignerIdentity::Keyed { key_id } => {
+            let pub_key_b64 = matching.iter().find_map(|p| p.public_key.as_ref());
+            let key_bytes = if let Some(b64) = pub_key_b64 {
+                base64_decode(b64)
+                    .map_err(|_| "invalid base64 in publisher public_key".to_string())?
+            } else {
+                load_public_key_bytes(key_id).map_err(|e| {
+                    format!(
+                        "no public_key in publisher and keystore lookup failed for '{key_id}': {e}"
+                    )
+                })?
+            };
+            trust::verify_keyed_signature(&bundle, &key_bytes, bundle_path)
+                .map_err(|e| format!("signature verification failed: {e}"))?;
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            // For keyless, verify using the first subject's digest
+            let subjects = trust::extract_all_subjects(&bundle, bundle_path)
+                .map_err(|e| format!("failed to extract subjects: {e}"))?;
+            let first_digest = subjects
+                .first()
+                .map(|(_, d)| d.as_str())
+                .ok_or("no subjects in bundle")?;
+            let trusted_root = trust::load_production_trusted_root()
+                .map_err(|e| format!("failed to load Sigstore trusted root: {e}"))?;
+            let sigstore_policy = trust::VerificationPolicy::default();
+            trust::verify_bundle_with_digest(
+                first_digest,
+                &bundle,
+                &trusted_root,
+                &sigstore_policy,
+                bundle_path,
+            )
+            .map_err(|e| format!("Sigstore verification failed: {e}"))?;
+        }
+    }
+
+    // Extract and verify each subject's digest
+    let subjects = trust::extract_all_subjects(&bundle, bundle_path)
+        .map_err(|e| format!("failed to extract subjects: {e}"))?;
+
+    let signer_name = format_identity(&identity);
+    let mut results = Vec::with_capacity(subjects.len());
+
+    for (name, expected_digest) in &subjects {
+        let file_path = scan_root.join(name);
+        let actual_digest = trust::file_digest(&file_path)
+            .map_err(|e| format!("failed to read subject '{}': {e}", name))?;
+        if actual_digest != *expected_digest {
+            return Err(format!(
+                "digest mismatch for '{}': file has been modified since signing",
+                name
+            ));
+        }
+        results.push((name.clone(), signer_name.clone()));
+    }
+
+    Ok(results)
 }
 
 fn verify_single_file(
@@ -739,18 +1024,34 @@ fn resolve_files(
         let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
         trust::find_instruction_files(&policy, &cwd)
     } else {
-        // Canonicalize explicit paths
-        let mut resolved = Vec::with_capacity(explicit.len());
-        for path in explicit {
-            let canonical =
-                std::fs::canonicalize(path).map_err(|e| nono::NonoError::TrustSigning {
-                    path: path.display().to_string(),
-                    reason: format!("file not found: {e}"),
-                })?;
-            resolved.push(canonical);
-        }
-        Ok(resolved)
+        canonicalize_paths(explicit)
     }
+}
+
+/// Resolve files using an already-loaded policy (avoids duplicate policy load warnings).
+fn resolve_files_with_policy(
+    explicit: &[PathBuf],
+    all: bool,
+    policy: &trust::TrustPolicy,
+) -> Result<Vec<PathBuf>> {
+    if all {
+        let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
+        trust::find_instruction_files(policy, &cwd)
+    } else {
+        canonicalize_paths(explicit)
+    }
+}
+
+fn canonicalize_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::with_capacity(paths.len());
+    for path in paths {
+        let canonical = std::fs::canonicalize(path).map_err(|e| nono::NonoError::TrustSigning {
+            path: path.display().to_string(),
+            reason: format!("file not found: {e}"),
+        })?;
+        resolved.push(canonical);
+    }
+    Ok(resolved)
 }
 
 // ---------------------------------------------------------------------------

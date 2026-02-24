@@ -433,7 +433,10 @@ mod tests {
         let skills = dir.path().join("SKILLS.md");
         std::fs::write(&skills, "# Skills").unwrap();
 
-        let policy = TrustPolicy::default();
+        let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
+            ..TrustPolicy::default()
+        };
         let mut interceptor = TrustInterceptor::new(policy, dir.path().to_path_buf()).unwrap();
 
         // Should return Some (it IS an instruction file)
@@ -448,6 +451,7 @@ mod tests {
         std::fs::write(&skills, "# Skills").unwrap();
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -468,6 +472,7 @@ mod tests {
         std::fs::write(&skills, "# Skills v1").unwrap();
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -495,6 +500,7 @@ mod tests {
         let digest = trust::bytes_digest(content);
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
             enforcement: trust::Enforcement::Audit,
             blocklist: trust::Blocklist {
                 digests: vec![trust::BlocklistEntry {

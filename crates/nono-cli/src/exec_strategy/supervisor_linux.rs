@@ -6,8 +6,11 @@
 //! - Path opens performed by the supervisor must re-validate policy boundaries.
 //! - Security boundary: the supervisor's `open_path_for_access()` + `inject_fd()`
 //!   is authoritative. `notif_id_valid()` only proves notification liveness.
+//! - Instruction files undergo trust verification with TOCTOU protection via
+//!   digest re-check at fd open time.
 
 use super::*;
+use crate::trust_intercept::TrustInterceptor;
 
 /// Token-bucket rate limiter for supervisor expansion requests.
 ///
@@ -69,14 +72,19 @@ impl RateLimiter {
 /// 4. Check never_grant -> deny (BEFORE initial-set fast-path)
 /// 5. Fast-path: if path is in initial set, open + inject fd immediately
 /// 6. Rate limit check -> deny if exceeded
-/// 7. Delegate to approval backend
-/// 8. Second TOCTOU check before inject/deny
-/// 9. If approved: open path + inject fd. If denied: deny notification.
+/// 7. Trust verification for instruction files (if trust_interceptor present)
+/// 8. Delegate to approval backend
+/// 9. Second TOCTOU check before inject/deny
+/// 10. If approved: open path + inject fd (with TOCTOU digest re-check for
+///     instruction files). If denied: deny notification.
 ///
 /// TOCTOU boundary note:
 /// - The child controls userspace pointers until syscall completion.
 /// - We treat notification ID validation as a liveness guard only.
 /// - Authorization is bound to the file descriptor opened by the supervisor.
+/// - Instruction files undergo additional TOCTOU protection: the verified
+///   digest is re-checked against the opened fd to detect races between
+///   trust verification and file open.
 ///
 /// The initial_caps parameter contains (path, is_file) tuples:
 /// - For files (is_file=true): only exact path matches are allowed
@@ -88,6 +96,7 @@ pub(super) fn handle_seccomp_notification(
     initial_caps: &[(std::path::PathBuf, bool)],
     rate_limiter: &mut RateLimiter,
     denials: &mut Vec<DenialRecord>,
+    mut trust_interceptor: Option<&mut TrustInterceptor>,
 ) -> Result<()> {
     use nono::sandbox::{
         classify_access_from_flags, deny_notif, inject_fd, notif_id_valid, read_notif_path,
@@ -233,7 +242,46 @@ pub(super) fn handle_seccomp_notification(
         return Ok(());
     }
 
-    // 7. Delegate to approval backend
+    // 7. Trust verification for instruction files (TOCTOU protection)
+    // If the path is an instruction file, verify it and stash the digest
+    // for re-verification at open time. Failed verification results in early denial.
+    let verified_digest: Option<String> = if let Some(trust_result) = trust_interceptor
+        .as_mut()
+        .and_then(|ti| ti.check_path(&path))
+    {
+        match trust_result {
+            Ok(verified) => {
+                debug!(
+                    "Seccomp: instruction file {} verified (publisher: {})",
+                    path.display(),
+                    verified.publisher,
+                );
+                Some(verified.digest)
+            }
+            Err(reason) => {
+                // Instruction file failed trust verification — auto-deny
+                debug!(
+                    "Seccomp: instruction file {} failed trust verification: {}",
+                    path.display(),
+                    reason
+                );
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: path.clone(),
+                        access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
+                let _ = deny_notif(notify_fd, notif.id);
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
+    // 8. Delegate to approval backend (for both instruction and non-instruction files)
     let request = nono::supervisor::CapabilityRequest {
         request_id: format!("seccomp-{}", unique_request_id()),
         path: path.clone(),
@@ -272,15 +320,21 @@ pub(super) fn handle_seccomp_notification(
         }
     };
 
-    // 8. Second TOCTOU check before acting on the decision
+    // 9. Second TOCTOU check before acting on the decision
     if !notif_id_valid(notify_fd, notif.id)? {
         debug!("Seccomp notification expired (second TOCTOU check)");
         return Ok(());
     }
 
-    // 9. Act on the decision
+    // 10. Act on the decision
+    // Pass verified_digest to enable TOCTOU re-verification for instruction files
     if decision.is_granted() {
-        match open_path_for_access(&canonicalized, &access, config.never_grant, None) {
+        match open_path_for_access(
+            &canonicalized,
+            &access,
+            config.never_grant,
+            verified_digest.as_deref(),
+        ) {
             Ok(file) => {
                 inject_fd(notify_fd, notif.id, file.as_raw_fd())?;
             }

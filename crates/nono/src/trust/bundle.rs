@@ -444,8 +444,8 @@ pub fn verify_bundle_subject_name(bundle: &Bundle, expected_path: &Path) -> Resu
 
 /// Extract the `predicateType` from a bundle's DSSE envelope payload.
 ///
-/// Returns the predicate type string (e.g., `nono.dev/attestation/instruction-file/v1`
-/// or `nono.dev/attestation/trust-policy/v1`).
+/// Returns the predicate type string (e.g., `nono.sh/attestation/instruction-file/v1`
+/// or `nono.sh/attestation/trust-policy/v1`).
 ///
 /// # Errors
 ///
@@ -715,6 +715,62 @@ pub fn bundle_path_for(artifact_path: &Path) -> std::path::PathBuf {
     let mut bundle = artifact_path.as_os_str().to_owned();
     bundle.push(".bundle");
     std::path::PathBuf::from(bundle)
+}
+
+/// Resolve the conventional path for a multi-subject trust bundle.
+///
+/// Multi-subject bundles are stored as `.nono-trust.bundle` in the given
+/// directory (typically the project root or skill directory).
+#[must_use]
+pub fn multi_subject_bundle_path(dir_path: &Path) -> std::path::PathBuf {
+    dir_path.join(".nono-trust.bundle")
+}
+
+// ---------------------------------------------------------------------------
+// Multi-subject extraction
+// ---------------------------------------------------------------------------
+
+/// Extract all subjects from a bundle's DSSE envelope.
+///
+/// Returns `Vec<(name, sha256_hex)>` — one entry per subject in the
+/// in-toto statement. Works for both single-subject and multi-subject bundles.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustVerification` if the bundle cannot be parsed
+/// or any subject is missing a SHA-256 digest.
+pub fn extract_all_subjects(bundle: &Bundle, bundle_path: &Path) -> Result<Vec<(String, String)>> {
+    let contents = DsseContents::from_bundle(bundle, bundle_path)?;
+    let subjects = contents
+        .statement
+        .get("subject")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| NonoError::TrustVerification {
+            path: bundle_path.display().to_string(),
+            reason: "no subjects array in statement".to_string(),
+        })?;
+
+    let mut result = Vec::with_capacity(subjects.len());
+    for subject in subjects {
+        let name = subject
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: "subject missing name".to_string(),
+            })?;
+        let digest = subject
+            .get("digest")
+            .and_then(|v| v.get("sha256"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NonoError::TrustVerification {
+                path: bundle_path.display().to_string(),
+                reason: format!("subject '{name}' missing sha256 digest"),
+            })?;
+        result.push((name.to_string(), digest.to_string()));
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1086,72 @@ mod tests {
             publisher.matches(&identity),
             "publisher should match extracted identity"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // multi_subject_bundle_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multi_subject_bundle_path_in_cwd() {
+        let path = multi_subject_bundle_path(Path::new("."));
+        assert_eq!(path, Path::new("./.nono-trust.bundle"));
+    }
+
+    #[test]
+    fn multi_subject_bundle_path_in_dir() {
+        let path = multi_subject_bundle_path(Path::new("/home/user/project"));
+        assert_eq!(path, Path::new("/home/user/project/.nono-trust.bundle"));
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_all_subjects
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_all_subjects_single() {
+        // Create a real signed bundle with one subject
+        let kp = crate::trust::signing::generate_signing_key().unwrap();
+        let json = crate::trust::signing::sign_bytes(b"content", "file.md", &kp, "key").unwrap();
+        let bundle = Bundle::from_json(&json).unwrap();
+
+        let subjects = extract_all_subjects(&bundle, Path::new("test.bundle")).unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].0, "file.md");
+        assert_eq!(subjects[0].1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn extract_all_subjects_multi() {
+        // Create a real signed bundle with multiple subjects
+        let kp = crate::trust::signing::generate_signing_key().unwrap();
+        let files = vec![
+            (
+                std::path::PathBuf::from("SKILL.md"),
+                crate::trust::digest::bytes_digest(b"skill"),
+            ),
+            (
+                std::path::PathBuf::from("lib/helper.py"),
+                crate::trust::digest::bytes_digest(b"helper"),
+            ),
+            (
+                std::path::PathBuf::from("config.json"),
+                crate::trust::digest::bytes_digest(b"config"),
+            ),
+        ];
+        let json = crate::trust::signing::sign_files(&files, &kp, "key").unwrap();
+        let bundle = Bundle::from_json(&json).unwrap();
+
+        let subjects = extract_all_subjects(&bundle, Path::new("test.bundle")).unwrap();
+        assert_eq!(subjects.len(), 3);
+        assert_eq!(subjects[0].0, "SKILL.md");
+        assert_eq!(subjects[1].0, "lib/helper.py");
+        assert_eq!(subjects[2].0, "config.json");
+
+        // Digests should match what we computed
+        assert_eq!(subjects[0].1, crate::trust::digest::bytes_digest(b"skill"));
+        assert_eq!(subjects[1].1, crate::trust::digest::bytes_digest(b"helper"));
+        assert_eq!(subjects[2].1, crate::trust::digest::bytes_digest(b"config"));
     }
 
     fn make_empty_cert_chain_bundle_json() -> String {

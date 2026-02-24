@@ -263,8 +263,10 @@ pub fn run_pre_exec_scan(
     silent: bool,
 ) -> Result<ScanResult> {
     let files = trust::find_instruction_files(policy, scan_root)?;
+    let multi_bundle = trust::multi_subject_bundle_path(scan_root);
+    let has_multi_bundle = multi_bundle.exists();
 
-    if files.is_empty() {
+    if files.is_empty() && !has_multi_bundle {
         return Ok(ScanResult {
             results: Vec::new(),
             verified: 0,
@@ -273,10 +275,13 @@ pub fn run_pre_exec_scan(
         });
     }
 
-    if !silent {
+    let total_hint = files
+        .len()
+        .saturating_add(if has_multi_bundle { 1 } else { 0 });
+    if !silent && total_hint > 0 {
         eprintln!(
             "  Scanning {} instruction file(s) for trust verification...",
-            files.len()
+            total_hint
         );
     }
 
@@ -285,7 +290,42 @@ pub fn run_pre_exec_scan(
     let mut blocked = 0u32;
     let mut warned = 0u32;
 
+    // Track paths verified via multi-subject bundle to avoid duplicate per-file checks
+    let mut multi_verified_paths: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
+
+    // Check multi-subject .nono-trust.bundle FIRST to collect verified paths
+    if has_multi_bundle {
+        let multi_results = verify_multi_subject_bundle(&multi_bundle, scan_root, policy);
+
+        for result in &multi_results {
+            if !silent {
+                print_verification_line(&result.path, scan_root, result, policy.enforcement);
+            }
+
+            if result.outcome.is_verified() {
+                verified = verified.saturating_add(1);
+                // Track canonical path for deduplication
+                if let Ok(canon) = std::fs::canonicalize(&result.path) {
+                    multi_verified_paths.insert(canon);
+                }
+            } else if result.outcome.should_block(policy.enforcement) {
+                blocked = blocked.saturating_add(1);
+            } else {
+                warned = warned.saturating_add(1);
+            }
+        }
+
+        results.extend(multi_results);
+    }
+
+    // Per-file verification, skipping files already verified via multi-subject bundle
     for file_path in &files {
+        // Skip if already verified via multi-subject bundle
+        if multi_verified_paths.contains(file_path) {
+            continue;
+        }
+
         let result = verify_instruction_file(file_path, policy);
 
         if !silent {
@@ -489,6 +529,182 @@ fn verify_keyless_crypto(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-subject bundle verification
+// ---------------------------------------------------------------------------
+
+/// Verify a multi-subject `.nono-trust.bundle` and return per-file results.
+///
+/// Loads the bundle, verifies cryptographic integrity (keyed or keyless),
+/// checks the signer matches a publisher in the trust policy, then verifies
+/// each subject's digest against the file on disk.
+fn verify_multi_subject_bundle(
+    bundle_path: &Path,
+    scan_root: &Path,
+    policy: &TrustPolicy,
+) -> Vec<VerificationResult> {
+    let bundle = match trust::load_bundle(bundle_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return vec![VerificationResult {
+                path: bundle_path.to_path_buf(),
+                digest: String::new(),
+                outcome: VerificationOutcome::InvalidSignature {
+                    detail: format!("invalid bundle: {e}"),
+                },
+            }];
+        }
+    };
+
+    // Validate predicate type
+    let predicate_type = match trust::extract_predicate_type(&bundle, bundle_path) {
+        Ok(pt) => pt,
+        Err(e) => {
+            return vec![VerificationResult {
+                path: bundle_path.to_path_buf(),
+                digest: String::new(),
+                outcome: VerificationOutcome::InvalidSignature {
+                    detail: format!("failed to extract predicate type: {e}"),
+                },
+            }];
+        }
+    };
+    if predicate_type != trust::NONO_MULTI_SUBJECT_PREDICATE_TYPE {
+        return vec![VerificationResult {
+            path: bundle_path.to_path_buf(),
+            digest: String::new(),
+            outcome: VerificationOutcome::InvalidSignature {
+                detail: format!(
+                    "wrong bundle type: expected multi-file attestation, got {predicate_type}"
+                ),
+            },
+        }];
+    }
+
+    // Extract signer identity
+    let identity = match trust::extract_signer_identity(&bundle, bundle_path) {
+        Ok(id) => id,
+        Err(e) => {
+            return vec![VerificationResult {
+                path: bundle_path.to_path_buf(),
+                digest: String::new(),
+                outcome: VerificationOutcome::InvalidSignature {
+                    detail: format!("no signer identity: {e}"),
+                },
+            }];
+        }
+    };
+
+    // Cryptographic verification (keyed or keyless)
+    let crypto_result = match &identity {
+        trust::SignerIdentity::Keyed { .. } => {
+            verify_keyed_crypto(&bundle, &identity, policy, bundle_path)
+        }
+        trust::SignerIdentity::Keyless { .. } => {
+            // For keyless multi-subject, we verify the bundle signature against the
+            // first subject's digest. The signature covers the entire DSSE envelope
+            // which includes all subjects, so verifying once covers all.
+            let subjects = match trust::extract_all_subjects(&bundle, bundle_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    return vec![VerificationResult {
+                        path: bundle_path.to_path_buf(),
+                        digest: String::new(),
+                        outcome: VerificationOutcome::InvalidSignature {
+                            detail: format!("failed to extract subjects: {e}"),
+                        },
+                    }];
+                }
+            };
+            if let Some((_, ref digest)) = subjects.first() {
+                verify_keyless_crypto(bundle_path, digest, &bundle, bundle_path)
+            } else {
+                Err(VerificationOutcome::InvalidSignature {
+                    detail: "no subjects in multi-subject bundle".to_string(),
+                })
+            }
+        }
+    };
+
+    if let Err(outcome) = crypto_result {
+        return vec![VerificationResult {
+            path: bundle_path.to_path_buf(),
+            digest: String::new(),
+            outcome,
+        }];
+    }
+
+    // Extract subjects and verify each file's digest
+    let subjects = match trust::extract_all_subjects(&bundle, bundle_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![VerificationResult {
+                path: bundle_path.to_path_buf(),
+                digest: String::new(),
+                outcome: VerificationOutcome::InvalidSignature {
+                    detail: format!("failed to extract subjects: {e}"),
+                },
+            }];
+        }
+    };
+
+    let publisher_name = format_identity(&identity);
+    let mut results = Vec::with_capacity(subjects.len());
+
+    for (name, expected_digest) in &subjects {
+        let file_path = scan_root.join(name);
+
+        let actual_digest = match trust::file_digest(&file_path) {
+            Ok(d) => d,
+            Err(e) => {
+                results.push(VerificationResult {
+                    path: file_path,
+                    digest: String::new(),
+                    outcome: VerificationOutcome::InvalidSignature {
+                        detail: format!("failed to read subject file: {e}"),
+                    },
+                });
+                continue;
+            }
+        };
+
+        if actual_digest != *expected_digest {
+            results.push(VerificationResult {
+                path: file_path,
+                digest: actual_digest.clone(),
+                outcome: VerificationOutcome::DigestMismatch {
+                    expected: expected_digest.clone(),
+                    actual: actual_digest,
+                },
+            });
+            continue;
+        }
+
+        // Check publisher matches trust policy
+        let matching = policy.matching_publishers(&identity);
+        if matching.is_empty() {
+            results.push(VerificationResult {
+                path: file_path,
+                digest: actual_digest,
+                outcome: VerificationOutcome::UntrustedPublisher {
+                    identity: identity.clone(),
+                },
+            });
+            continue;
+        }
+
+        results.push(VerificationResult {
+            path: file_path,
+            digest: actual_digest,
+            outcome: VerificationOutcome::Verified {
+                publisher: publisher_name.clone(),
+            },
+        });
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
 // Output helpers
 // ---------------------------------------------------------------------------
 
@@ -605,6 +821,7 @@ mod tests {
         std::fs::write(dir.path().join("SKILLS.md"), "# Skills").unwrap();
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Warn,
             ..TrustPolicy::default()
         };
@@ -621,6 +838,7 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), "# Claude").unwrap();
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["CLAUDE.md".to_string()],
             enforcement: Enforcement::Deny,
             ..TrustPolicy::default()
         };
@@ -639,6 +857,7 @@ mod tests {
         let digest = trust::bytes_digest(content);
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
             enforcement: Enforcement::Audit, // Even audit blocks blocklisted files
             blocklist: trust::Blocklist {
                 digests: vec![trust::BlocklistEntry {
@@ -663,6 +882,7 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), "# Claude").unwrap();
 
         let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string(), "CLAUDE.md".to_string()],
             enforcement: Enforcement::Audit,
             ..TrustPolicy::default()
         };
@@ -748,6 +968,225 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unsigned"));
+    }
+
+    #[test]
+    fn multi_subject_bundle_detected_and_verified() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create two files
+        let content_a = b"file A content";
+        let content_b = b"file B content";
+        std::fs::write(dir.path().join("a.md"), content_a).unwrap();
+        std::fs::write(dir.path().join("b.py"), content_b).unwrap();
+
+        let digest_a = trust::bytes_digest(content_a);
+        let digest_b = trust::bytes_digest(content_b);
+
+        // Sign with keyed multi-subject
+        let key_pair = trust::generate_signing_key().unwrap();
+        let key_id = trust::key_id_hex(&key_pair).unwrap();
+        let pub_key_bytes = trust::export_public_key(&key_pair).unwrap();
+        let pub_key_b64 = nono::trust::base64::base64_encode(pub_key_bytes.as_bytes());
+
+        let files = vec![
+            (std::path::PathBuf::from("a.md"), digest_a),
+            (std::path::PathBuf::from("b.py"), digest_b),
+        ];
+        let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        let bundle_path = trust::multi_subject_bundle_path(dir.path());
+        std::fs::write(&bundle_path, &bundle_json).unwrap();
+
+        let policy = TrustPolicy {
+            instruction_patterns: Vec::new(), // no instruction patterns — multi-subject only
+            enforcement: Enforcement::Deny,
+            publishers: vec![trust::Publisher {
+                name: "test".to_string(),
+                issuer: None,
+                repository: None,
+                workflow: None,
+                ref_pattern: None,
+                key_id: Some(key_id),
+                public_key: Some(pub_key_b64),
+            }],
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
+        assert!(result.should_proceed());
+        assert_eq!(result.verified, 2);
+        assert_eq!(result.blocked, 0);
+    }
+
+    #[test]
+    fn multi_subject_bundle_detects_tampered_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let content_a = b"file A content";
+        let content_b = b"file B content";
+        std::fs::write(dir.path().join("a.md"), content_a).unwrap();
+        std::fs::write(dir.path().join("b.py"), content_b).unwrap();
+
+        let digest_a = trust::bytes_digest(content_a);
+        let digest_b = trust::bytes_digest(content_b);
+
+        let key_pair = trust::generate_signing_key().unwrap();
+        let key_id = trust::key_id_hex(&key_pair).unwrap();
+        let pub_key_bytes = trust::export_public_key(&key_pair).unwrap();
+        let pub_key_b64 = nono::trust::base64::base64_encode(pub_key_bytes.as_bytes());
+
+        let files = vec![
+            (std::path::PathBuf::from("a.md"), digest_a),
+            (std::path::PathBuf::from("b.py"), digest_b),
+        ];
+        let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
+
+        // Tamper with b.py after signing
+        std::fs::write(dir.path().join("b.py"), b"TAMPERED").unwrap();
+
+        let policy = TrustPolicy {
+            instruction_patterns: Vec::new(),
+            enforcement: Enforcement::Deny,
+            publishers: vec![trust::Publisher {
+                name: "test".to_string(),
+                issuer: None,
+                repository: None,
+                workflow: None,
+                ref_pattern: None,
+                key_id: Some(key_id),
+                public_key: Some(pub_key_b64),
+            }],
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
+        // a.md verified, b.py mismatch
+        assert_eq!(result.verified, 1);
+        assert_eq!(result.blocked, 1);
+        assert!(!result.should_proceed());
+    }
+
+    #[test]
+    fn multi_subject_bundle_missing_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let content_a = b"file A content";
+        std::fs::write(dir.path().join("a.md"), content_a).unwrap();
+
+        let digest_a = trust::bytes_digest(content_a);
+        let digest_b = trust::bytes_digest(b"file B content");
+
+        let key_pair = trust::generate_signing_key().unwrap();
+        let key_id = trust::key_id_hex(&key_pair).unwrap();
+        let pub_key_bytes = trust::export_public_key(&key_pair).unwrap();
+        let pub_key_b64 = nono::trust::base64::base64_encode(pub_key_bytes.as_bytes());
+
+        let files = vec![
+            (std::path::PathBuf::from("a.md"), digest_a),
+            (std::path::PathBuf::from("b.py"), digest_b), // b.py doesn't exist on disk
+        ];
+        let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
+
+        let policy = TrustPolicy {
+            instruction_patterns: Vec::new(),
+            enforcement: Enforcement::Deny,
+            publishers: vec![trust::Publisher {
+                name: "test".to_string(),
+                issuer: None,
+                repository: None,
+                workflow: None,
+                ref_pattern: None,
+                key_id: Some(key_id),
+                public_key: Some(pub_key_b64),
+            }],
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
+        assert_eq!(result.verified, 1); // a.md passes
+        assert_eq!(result.blocked, 1); // b.py missing = fail
+    }
+
+    #[test]
+    fn multi_subject_verified_paths_included() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let content_a = b"script content";
+        std::fs::write(dir.path().join("script.py"), content_a).unwrap();
+        let digest_a = trust::bytes_digest(content_a);
+
+        let key_pair = trust::generate_signing_key().unwrap();
+        let key_id = trust::key_id_hex(&key_pair).unwrap();
+        let pub_key_bytes = trust::export_public_key(&key_pair).unwrap();
+        let pub_key_b64 = nono::trust::base64::base64_encode(pub_key_bytes.as_bytes());
+
+        let files = vec![(std::path::PathBuf::from("script.py"), digest_a)];
+        let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
+
+        let policy = TrustPolicy {
+            instruction_patterns: Vec::new(),
+            enforcement: Enforcement::Deny,
+            publishers: vec![trust::Publisher {
+                name: "test".to_string(),
+                issuer: None,
+                repository: None,
+                workflow: None,
+                ref_pattern: None,
+                key_id: Some(key_id),
+                public_key: Some(pub_key_b64),
+            }],
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
+        let paths = result.verified_paths();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], dir.path().join("script.py"));
+    }
+
+    #[test]
+    fn multi_subject_untrusted_publisher_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let content = b"content";
+        std::fs::write(dir.path().join("a.md"), content).unwrap();
+        let digest = trust::bytes_digest(content);
+
+        let key_pair = trust::generate_signing_key().unwrap();
+        let key_id = trust::key_id_hex(&key_pair).unwrap();
+
+        let files = vec![(std::path::PathBuf::from("a.md"), digest)];
+        let bundle_json = trust::sign_files(&files, &key_pair, &key_id).unwrap();
+        std::fs::write(trust::multi_subject_bundle_path(dir.path()), &bundle_json).unwrap();
+
+        // Policy has a different publisher — mismatch
+        let other_key_pair = trust::generate_signing_key().unwrap();
+        let other_key_id = trust::key_id_hex(&other_key_pair).unwrap();
+        let other_pub_bytes = trust::export_public_key(&other_key_pair).unwrap();
+        let other_pub_b64 = nono::trust::base64::base64_encode(other_pub_bytes.as_bytes());
+
+        let policy = TrustPolicy {
+            instruction_patterns: Vec::new(),
+            enforcement: Enforcement::Deny,
+            publishers: vec![trust::Publisher {
+                name: "other".to_string(),
+                issuer: None,
+                repository: None,
+                workflow: None,
+                ref_pattern: None,
+                key_id: Some(other_key_id),
+                public_key: Some(other_pub_b64),
+            }],
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
+        // Crypto verification will fail (wrong key), so blocked
+        assert!(!result.should_proceed());
+        assert_eq!(result.blocked, 1);
     }
 
     #[test]

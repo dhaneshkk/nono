@@ -21,10 +21,17 @@ pub const IN_TOTO_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 pub const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 
 /// The predicate type for nono instruction file attestations.
-pub const NONO_PREDICATE_TYPE: &str = "https://nono.dev/attestation/instruction-file/v1";
+pub const NONO_PREDICATE_TYPE: &str = "https://nono.sh/attestation/instruction-file/v1";
 
 /// The predicate type for nono trust policy attestations.
-pub const NONO_POLICY_PREDICATE_TYPE: &str = "https://nono.dev/attestation/trust-policy/v1";
+pub const NONO_POLICY_PREDICATE_TYPE: &str = "https://nono.sh/attestation/trust-policy/v1";
+
+/// The predicate type for nono multi-file attestations.
+///
+/// Used when multiple files are signed together in a single bundle
+/// (e.g., a skill's SKILL.md + companion scripts). All files appear
+/// as subjects in the same in-toto statement.
+pub const NONO_MULTI_SUBJECT_PREDICATE_TYPE: &str = "https://nono.sh/attestation/multi-file/v1";
 
 /// A DSSE (Dead Simple Signing Envelope).
 ///
@@ -426,6 +433,39 @@ pub fn new_policy_statement(
         signer_predicate,
         NONO_POLICY_PREDICATE_TYPE,
     )
+}
+
+/// Create a new in-toto statement for a multi-file attestation.
+///
+/// Each `(name, sha256_hex)` pair becomes a subject in the statement.
+/// Used when signing multiple files together (e.g., SKILL.md + lib/script.py).
+///
+/// # Panics
+///
+/// Does not panic. Returns a statement with the provided subjects.
+#[must_use]
+pub fn new_multi_subject_statement(
+    subjects: &[(String, String)],
+    signer_predicate: serde_json::Value,
+) -> InTotoStatement {
+    let subject = subjects
+        .iter()
+        .map(|(name, sha256_hex)| {
+            let mut digest = HashMap::new();
+            digest.insert("sha256".to_string(), sha256_hex.clone());
+            InTotoSubject {
+                name: name.clone(),
+                digest,
+            }
+        })
+        .collect();
+
+    InTotoStatement {
+        statement_type: IN_TOTO_STATEMENT_TYPE.to_string(),
+        subject,
+        predicate_type: NONO_MULTI_SUBJECT_PREDICATE_TYPE.to_string(),
+        predicate: signer_predicate,
+    }
 }
 
 /// Create a DSSE envelope wrapping an in-toto statement.
@@ -871,6 +911,89 @@ mod tests {
     #[test]
     fn instruction_and_policy_predicate_types_differ() {
         assert_ne!(NONO_PREDICATE_TYPE, NONO_POLICY_PREDICATE_TYPE);
+    }
+
+    #[test]
+    fn multi_subject_predicate_type_is_unique() {
+        assert_ne!(NONO_MULTI_SUBJECT_PREDICATE_TYPE, NONO_PREDICATE_TYPE);
+        assert_ne!(
+            NONO_MULTI_SUBJECT_PREDICATE_TYPE,
+            NONO_POLICY_PREDICATE_TYPE
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // new_multi_subject_statement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multi_subject_statement_structure() {
+        let subjects = vec![
+            ("SKILL.md".to_string(), "aaa111".to_string()),
+            ("lib/script.py".to_string(), "bbb222".to_string()),
+        ];
+        let predicate = serde_json::json!({
+            "version": 1,
+            "signer": { "kind": "keyed", "key_id": "test" }
+        });
+        let stmt = new_multi_subject_statement(&subjects, predicate);
+
+        assert_eq!(stmt.statement_type, IN_TOTO_STATEMENT_TYPE);
+        assert_eq!(stmt.predicate_type, NONO_MULTI_SUBJECT_PREDICATE_TYPE);
+        assert_eq!(stmt.subject.len(), 2);
+        assert_eq!(stmt.subject[0].name, "SKILL.md");
+        assert_eq!(stmt.subject[0].digest["sha256"], "aaa111");
+        assert_eq!(stmt.subject[1].name, "lib/script.py");
+        assert_eq!(stmt.subject[1].digest["sha256"], "bbb222");
+    }
+
+    #[test]
+    fn multi_subject_statement_single_subject() {
+        let subjects = vec![("only.md".to_string(), "digest123".to_string())];
+        let predicate = serde_json::json!({"version": 1});
+        let stmt = new_multi_subject_statement(&subjects, predicate);
+
+        assert_eq!(stmt.subject.len(), 1);
+        assert_eq!(stmt.subject[0].name, "only.md");
+    }
+
+    #[test]
+    fn multi_subject_statement_roundtrips_through_envelope() {
+        let subjects = vec![
+            ("a.md".to_string(), "aaa".to_string()),
+            ("b.py".to_string(), "bbb".to_string()),
+            ("c.json".to_string(), "ccc".to_string()),
+        ];
+        let predicate = serde_json::json!({
+            "version": 1,
+            "signer": { "kind": "keyed", "key_id": "test" }
+        });
+        let stmt = new_multi_subject_statement(&subjects, predicate);
+        let envelope = new_envelope(&stmt).unwrap();
+        let extracted = envelope.extract_statement().unwrap();
+
+        assert_eq!(extracted.subject.len(), 3);
+        assert_eq!(extracted.predicate_type, NONO_MULTI_SUBJECT_PREDICATE_TYPE);
+        assert_eq!(extracted.subject[0].name, "a.md");
+        assert_eq!(extracted.subject[1].name, "b.py");
+        assert_eq!(extracted.subject[2].name, "c.json");
+    }
+
+    #[test]
+    fn multi_subject_statement_preserves_signer_predicate() {
+        let subjects = vec![("f.md".to_string(), "ddd".to_string())];
+        let predicate = serde_json::json!({
+            "version": 1,
+            "signer": { "kind": "keyed", "key_id": "nono-keystore:default" }
+        });
+        let stmt = new_multi_subject_statement(&subjects, predicate);
+        let identity = stmt.extract_signer().unwrap();
+        match identity {
+            super::super::types::SignerIdentity::Keyed { key_id } => {
+                assert_eq!(key_id, "nono-keystore:default");
+            }
+            _ => panic!("expected keyed signer"),
+        }
     }
 
     // -----------------------------------------------------------------------

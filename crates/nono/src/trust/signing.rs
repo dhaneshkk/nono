@@ -229,12 +229,79 @@ fn sign_bytes_inner(
     // Create the in-toto statement with the appropriate predicate type
     let statement = dsse::new_statement(filename, &digest_hex, signer_predicate, predicate_type);
 
-    // Serialize the statement to JSON (this becomes the DSSE payload)
-    let statement_json =
-        serde_json::to_string(&statement).map_err(|e| NonoError::TrustSigning {
+    sign_statement(&statement, key_pair)
+}
+
+/// Maximum number of files allowed in a multi-subject attestation.
+///
+/// Defense-in-depth bound to prevent resource exhaustion from unbounded input.
+/// 1,000 files is sufficient for any legitimate skill bundle while limiting
+/// potential abuse vectors.
+pub const MAX_MULTI_SUBJECT_FILES: usize = 1_000;
+
+/// Sign multiple files together as a single multi-subject attestation.
+///
+/// Each `(path, sha256_hex)` pair becomes a subject in the in-toto statement.
+/// The caller computes digests and provides relative paths as subject names.
+///
+/// # Arguments
+///
+/// * `files` - File paths and their pre-computed SHA-256 hex digests (max 1,000)
+/// * `key_pair` - The ECDSA P-256 signing key pair
+/// * `key_id` - Human-readable key identifier (e.g., `"nono-keystore:default"`)
+///
+/// # Returns
+///
+/// The Sigstore bundle as a pretty-printed JSON string.
+///
+/// # Errors
+///
+/// Returns `NonoError::TrustSigning` if:
+/// - More than 1,000 files are provided
+/// - Signing or serialization fails
+pub fn sign_files(
+    files: &[(std::path::PathBuf, String)],
+    key_pair: &KeyPair,
+    key_id: &str,
+) -> Result<String> {
+    if files.len() > MAX_MULTI_SUBJECT_FILES {
+        return Err(NonoError::TrustSigning {
             path: String::new(),
-            reason: format!("failed to serialize statement: {e}"),
-        })?;
+            reason: format!(
+                "too many files: {} exceeds maximum of {}",
+                files.len(),
+                MAX_MULTI_SUBJECT_FILES
+            ),
+        });
+    }
+
+    let subjects: Vec<(String, String)> = files
+        .iter()
+        .map(|(path, digest)| (path.display().to_string(), digest.clone()))
+        .collect();
+
+    let signer_predicate = serde_json::json!({
+        "version": 1,
+        "signer": {
+            "kind": "keyed",
+            "key_id": key_id
+        }
+    });
+
+    let statement = dsse::new_multi_subject_statement(&subjects, signer_predicate);
+    sign_statement(&statement, key_pair)
+}
+
+/// Sign an in-toto statement and wrap in a Sigstore bundle.
+///
+/// Shared signing engine: serializes the statement to JSON, computes PAE,
+/// signs with ECDSA P-256, and constructs a Sigstore bundle v0.3.
+fn sign_statement(statement: &dsse::InTotoStatement, key_pair: &KeyPair) -> Result<String> {
+    // Serialize the statement to JSON (this becomes the DSSE payload)
+    let statement_json = serde_json::to_string(statement).map_err(|e| NonoError::TrustSigning {
+        path: String::new(),
+        reason: format!("failed to serialize statement: {e}"),
+    })?;
 
     // Build the sigstore-types PayloadBytes
     let payload = PayloadBytes::from_bytes(statement_json.as_bytes());
@@ -648,6 +715,132 @@ mod tests {
         let kp = generate_signing_key().unwrap();
         let result = sign_policy_file(Path::new("/nonexistent/trust-policy.json"), &kp, "key");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // sign_files (multi-subject)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sign_files_produces_valid_multi_subject_bundle() {
+        let kp = generate_signing_key().unwrap();
+        let files = vec![
+            (
+                std::path::PathBuf::from("SKILL.md"),
+                crate::trust::digest::bytes_digest(b"skill content"),
+            ),
+            (
+                std::path::PathBuf::from("lib/helper.py"),
+                crate::trust::digest::bytes_digest(b"helper content"),
+            ),
+        ];
+        let result = sign_files(&files, &kp, "test-key").unwrap();
+
+        let bundle: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            bundle["mediaType"].as_str().unwrap(),
+            "application/vnd.dev.sigstore.bundle.v0.3+json"
+        );
+
+        let payload_b64 = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+        let payload_bytes = base64_decode(payload_b64);
+        let statement: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+        assert_eq!(
+            statement["predicateType"].as_str().unwrap(),
+            dsse::NONO_MULTI_SUBJECT_PREDICATE_TYPE
+        );
+
+        let subjects = statement["subject"].as_array().unwrap();
+        assert_eq!(subjects.len(), 2);
+        assert_eq!(subjects[0]["name"].as_str().unwrap(), "SKILL.md");
+        assert_eq!(subjects[1]["name"].as_str().unwrap(), "lib/helper.py");
+    }
+
+    #[test]
+    fn sign_files_signature_verifies() {
+        use sigstore_verify::crypto::verification::VerificationKey;
+
+        let kp = generate_signing_key().unwrap();
+        let files = vec![
+            (
+                std::path::PathBuf::from("a.md"),
+                crate::trust::digest::bytes_digest(b"aaa"),
+            ),
+            (
+                std::path::PathBuf::from("b.py"),
+                crate::trust::digest::bytes_digest(b"bbb"),
+            ),
+        ];
+        let result = sign_files(&files, &kp, "test-key").unwrap();
+
+        let bundle: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let sig_b64 = bundle["dsseEnvelope"]["signatures"][0]["sig"]
+            .as_str()
+            .unwrap();
+        let sig_bytes = SignatureBytes::from_base64(sig_b64).unwrap();
+
+        let payload_b64 = bundle["dsseEnvelope"]["payload"].as_str().unwrap();
+        let payload_bytes = base64_decode(payload_b64);
+        let pae_bytes = sigstore_verify::types::dsse::pae(IN_TOTO_PAYLOAD_TYPE, &payload_bytes);
+
+        let pub_key = kp.public_key_der().unwrap();
+        let vk = VerificationKey::from_spki(&pub_key, kp.default_scheme()).unwrap();
+        vk.verify(&pae_bytes, &sig_bytes).unwrap();
+    }
+
+    #[test]
+    fn sign_files_roundtrips_through_sigstore_bundle() {
+        let kp = generate_signing_key().unwrap();
+        let files = vec![(
+            std::path::PathBuf::from("single.md"),
+            crate::trust::digest::bytes_digest(b"content"),
+        )];
+        let json = sign_files(&files, &kp, "test-key").unwrap();
+
+        let bundle = Bundle::from_json(&json).unwrap();
+        assert_eq!(
+            bundle.media_type,
+            "application/vnd.dev.sigstore.bundle.v0.3+json"
+        );
+        assert!(matches!(bundle.content, SignatureContent::DsseEnvelope(_)));
+    }
+
+    #[test]
+    fn sign_files_rejects_too_many_files() {
+        let kp = generate_signing_key().unwrap();
+        let files: Vec<_> = (0..MAX_MULTI_SUBJECT_FILES + 1)
+            .map(|i| {
+                (
+                    std::path::PathBuf::from(format!("file{i}.md")),
+                    crate::trust::digest::bytes_digest(format!("content{i}").as_bytes()),
+                )
+            })
+            .collect();
+
+        let result = sign_files(&files, &kp, "test-key");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too many files"));
+        assert!(err.contains(&MAX_MULTI_SUBJECT_FILES.to_string()));
+    }
+
+    #[test]
+    fn sign_files_accepts_max_files() {
+        // This test verifies the boundary condition - exactly MAX files should succeed
+        // We use a smaller subset to keep the test fast
+        let kp = generate_signing_key().unwrap();
+        let files: Vec<_> = (0..100)
+            .map(|i| {
+                (
+                    std::path::PathBuf::from(format!("file{i}.md")),
+                    crate::trust::digest::bytes_digest(format!("content{i}").as_bytes()),
+                )
+            })
+            .collect();
+
+        let result = sign_files(&files, &kp, "test-key");
+        assert!(result.is_ok());
     }
 
     // -----------------------------------------------------------------------

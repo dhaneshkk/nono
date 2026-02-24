@@ -34,12 +34,7 @@ impl Default for TrustPolicy {
     fn default() -> Self {
         Self {
             version: 1,
-            instruction_patterns: vec![
-                "SKILLS*".to_string(),
-                "CLAUDE*".to_string(),
-                "AGENT*".to_string(),
-                ".claude/**/*.md".to_string(),
-            ],
+            instruction_patterns: Vec::new(),
             publishers: Vec::new(),
             blocklist: Blocklist::default(),
             enforcement: Enforcement::default(),
@@ -487,9 +482,10 @@ mod tests {
         TrustPolicy {
             version: 1,
             instruction_patterns: vec![
-                "SKILLS*".to_string(),
-                "CLAUDE*".to_string(),
-                "AGENT*".to_string(),
+                "SKILLS*.md".to_string(),
+                "CLAUDE*.md".to_string(),
+                "AGENT*.md".to_string(),
+                ".github/copilot-instructions.md".to_string(),
                 ".claude/**/*.md".to_string(),
             ],
             publishers: vec![
@@ -532,18 +528,22 @@ mod tests {
         assert!(matcher.is_match("SKILLS.md"));
         assert!(matcher.is_match("SKILLS-custom.md"));
         assert!(matcher.is_match("CLAUDE.md"));
-        assert!(matcher.is_match("CLAUDErc"));
-        assert!(matcher.is_match("AGENT.MD"));
+        assert!(matcher.is_match("AGENT.md"));
         assert!(matcher.is_match("AGENTS.md"));
-        assert!(matcher.is_match("AGENTS.MD"));
+        assert!(matcher.is_match(".github/copilot-instructions.md"));
+        assert!(matcher.is_match(".claude/projects/foo/MEMORY.md"));
+        // Extensionless names must NOT match (avoids blocking executables
+        // on case-insensitive filesystems like macOS HFS+/APFS)
+        assert!(!matcher.is_match("claude"));
+        assert!(!matcher.is_match("CLAUDErc"));
     }
 
     #[test]
     fn instruction_patterns_returns_originals() {
         let policy = sample_policy();
         let matcher = policy.instruction_matcher().unwrap();
-        assert_eq!(matcher.patterns().len(), 4);
-        assert_eq!(matcher.patterns()[0], "SKILLS*");
+        assert_eq!(matcher.patterns().len(), 5);
+        assert_eq!(matcher.patterns()[0], "SKILLS*.md");
     }
 
     #[test]

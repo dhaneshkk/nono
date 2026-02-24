@@ -33,7 +33,7 @@ use colored::Colorize;
 use nono::{AccessMode, CapabilitySet, FsCapability, NonoError, Result, Sandbox};
 use profile::WorkdirAccess;
 use std::ffi::OsString;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -342,11 +342,32 @@ fn run_sandbox(
         // Inject instruction file deny rules into the Seatbelt profile (macOS only).
         // Deny-regex rules block reading any file matching instruction patterns.
         // Literal allows re-enable reading for files that passed verification.
+        let verified = result.verified_paths();
         instruction_deny::inject_instruction_deny_rules(
             &mut prepared.caps,
             &trust_policy,
-            &result.verified_paths(),
+            &verified,
         )?;
+
+        // Add verified multi-subject files as read-only capabilities.
+        // This makes the files structurally immutable post-sandbox on both
+        // platforms (Landlock on Linux, Seatbelt on macOS). No runtime digest
+        // re-checking is needed.
+        for path in &verified {
+            match FsCapability::new_file(path, AccessMode::Read) {
+                Ok(mut cap) => {
+                    cap.source = nono::CapabilitySource::System;
+                    prepared.caps.add_fs(cap);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to create capability for verified subject {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
 
         Some(result)
     };
@@ -361,6 +382,12 @@ fn run_sandbox(
     }
 
     let trust_scan_verified = scan_result.as_ref().is_some_and(|r| r.verified > 0);
+
+    // Extract write-protected paths (signed instruction files) for diagnostic output
+    let verified_protected_paths = scan_result
+        .as_ref()
+        .map(|r| r.verified_paths())
+        .unwrap_or_default();
 
     let proxy_active = matches!(
         prepared.caps.network_mode(),
@@ -393,6 +420,7 @@ fn run_sandbox(
             silent,
             scan_root,
             trust_scan_verified,
+            protected_paths: verified_protected_paths,
             rollback_exclude_patterns: prepared.rollback_exclude_patterns,
             rollback_exclude_globs: prepared.rollback_exclude_globs,
             proxy_active,
@@ -456,6 +484,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             silent,
             scan_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             trust_scan_verified: false,
+            protected_paths: Vec::new(),
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             proxy_active: false,
@@ -481,6 +510,8 @@ struct ExecutionFlags {
     scan_root: std::path::PathBuf,
     /// Whether trust scan ran and verified at least one file (crypto threads may linger)
     trust_scan_verified: bool,
+    /// Write-protected paths (signed instruction files) for diagnostic output
+    protected_paths: Vec<std::path::PathBuf>,
     /// Profile-specific rollback exclusion patterns (additive on base)
     rollback_exclude_patterns: Vec<String>,
     /// Profile-specific rollback exclusion globs (filename matching)
@@ -722,6 +753,7 @@ fn execute_sandboxed(
         cap_file: &cap_file_path,
         no_diagnostics: flags.no_diagnostics || flags.silent,
         threading,
+        protected_paths: &flags.protected_paths,
     };
 
     // Execute based on strategy

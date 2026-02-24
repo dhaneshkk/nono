@@ -28,7 +28,7 @@ There are two signing modes supported:
 
 **Keyed signing** -- A private key(s) is stored in the system keystore (macOS Keychain / Linux Secret Service). Suitable for individual developers and local workflows. Plans are in place to extend the key store to support more backends (e.g., HashiCorp Vault, AWS KMS) in the future.
 
-**Keyless signing** -- Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines and organizations. The signer's identity is cryptographically bound to the signature via the OIDC token.
+**Keyless signing** -- Ephemeral key + OIDC identity + Fulcio certificate + Rekor transparency log. Suitable for CI/CD pipelines with ambient OIDC tokens (e.g., GitHub Actions with `permissions: id-token: write`). The signer's identity is cryptographically bound to the signature via the OIDC token. Interactive browser-based keyless signing is not yet supported.
 
 Both modes produce [Sigstore bundle](https://docs.sigstore.dev/about/bundle/) v0.3 files, recognizable by the `.bundle` extension, stored alongside the signed file (e.g., `SKILLS.md.bundle`). Each bundle contains the signature, signing certificate, and metadata needed for verification.
 
@@ -45,12 +45,20 @@ This creates an ECDSA P-256 key pair and stores the private key in the system ke
 ### 2. Sign instruction files
 
 ```bash
+# Sign a single file (uses default key)
 nono trust sign SKILLS.md
-# or sign all instruction files at once
+
+# Sign with a specific key
+nono trust sign SKILLS.md --key my-signing-key
+
+# Sign multiple files into a single multi-subject bundle
+nono trust sign SKILLS.md CLAUDE.md helper.py
+
+# Sign all instruction files matching trust policy patterns
 nono trust sign --all
 ```
 
-Each signed file gets a `.bundle` sidecar (e.g., `SKILLS.md.bundle`). Commit these alongside the instruction files.
+When signing multiple files, nono creates a single `.nono-trust.bundle` file containing all subjects. This is more efficient for projects with many instruction files. Single-file signing creates per-file `.bundle` sidecars (e.g., `SKILLS.md.bundle`). Commit these alongside the instruction files.
 
 ### 3. Create a trust policy
 
@@ -70,15 +78,25 @@ Create `trust-policy.json` in the project root:
   "publishers": [
     {
       "name": "local-dev",
-      "key_id": "default"
+      "key_id": "default",
+      "public_key": "<BASE64_PUBLIC_KEY>"
     }
   ],
   "blocklist": {
-    "digests": []
+    "digests": [],
+    "publishers": []
   },
   "enforcement": "deny"
 }
 ```
+
+To get the public key in base64 format for the policy:
+
+```bash
+nono trust export-key --id default
+```
+
+This outputs the public key in base64 DER format, which you paste into the `public_key` field.
 
 ### 4. Sign the trust policy
 
@@ -121,14 +139,17 @@ A `SKILLS.md` in a subdirectory or unpacked from a dependency is caught by `SKIL
 
 Trusted publisher identities. A file's signature must match at least one publisher entry to be trusted.
 
-**Keyed publishers** match by key ID:
+**Keyed publishers** match by key ID and verify with the embedded public key:
 
 ```json
 {
   "name": "local-dev",
-  "key_id": "default"
+  "key_id": "default",
+  "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..."
 }
 ```
+
+The `public_key` field contains the base64-encoded DER SPKI public key. Use `nono trust export-key` to obtain this value.
 
 **Keyless (OIDC) publishers** match by identity claims from the Fulcio certificate:
 
@@ -242,15 +263,24 @@ With a user-level policy in place, project policies merge additively on top. A p
 
 ### nono trust sign
 
-Sign instruction files, producing `.bundle` sidecars.
+Sign instruction files. Single files produce per-file `.bundle` sidecars; multiple files produce a single `.nono-trust.bundle` multi-subject bundle.
 
 ```bash
-nono trust sign SKILLS.md                  # keyed (default key)
+nono trust sign SKILLS.md                  # keyed (default key), creates SKILLS.md.bundle
 nono trust sign SKILLS.md --key my-key     # keyed (specific key)
-nono trust sign SKILLS.md --keyless        # keyless (OIDC + Fulcio + Rekor)
-nono trust sign SKILLS.md CLAUDE.md        # multiple files
-nono trust sign --all                      # all instruction files in CWD
+nono trust sign SKILLS.md CLAUDE.md        # multi-subject bundle (.nono-trust.bundle)
+nono trust sign --all                      # all instruction files in CWD (multi-subject)
 ```
+
+**Keyless signing** (CI environments only):
+
+```bash
+nono trust sign SKILLS.md --keyless        # requires ambient OIDC (e.g., GitHub Actions)
+```
+
+<Note>
+  Keyless signing requires a CI environment with ambient OIDC tokens, such as GitHub Actions with `permissions: id-token: write`. Interactive browser-based keyless signing is not yet supported. Use keyed signing for local development.
+</Note>
 
 ### nono trust verify
 
@@ -280,11 +310,21 @@ nono trust list
 
 ### nono trust keygen
 
-Generate a signing key and store it in the system keystore.
+Generate an ECDSA P-256 signing key pair and store it in the system keystore (macOS Keychain / Linux Secret Service).
 
 ```bash
-nono trust keygen                          # default key ID
+nono trust keygen                          # default key ID ("default")
 nono trust keygen --id my-signing-key      # named key
+```
+
+### nono trust export-key
+
+Export the public key for a signing key in base64 DER format. Use this to populate the `public_key` field in trust policy publishers.
+
+```bash
+nono trust export-key                      # export default key
+nono trust export-key --id my-signing-key  # export named key
+nono trust export-key --pem                # output as PEM instead of base64 DER
 ```
 
 ### nono trust sign-policy
@@ -425,21 +465,31 @@ The `NONO_TRUST_OVERRIDE=1` environment variable is also supported for CI/CD con
 
 ## Signature Storage
 
-Bundles are stored as `<filename>.bundle` alongside the signed file:
+Bundles are stored in two formats depending on how files are signed:
+
+**Per-file bundles** (single file signing): `<filename>.bundle`
 
 ```
 project/
   SKILLS.md
   SKILLS.md.bundle
-  CLAUDE.md
-  CLAUDE.md.bundle
-  .claude/
-    commands/
-      deploy.md
-      deploy.md.bundle
   trust-policy.json
   trust-policy.json.bundle
 ```
+
+**Multi-subject bundles** (multiple files signed together): `.nono-trust.bundle`
+
+```
+project/
+  SKILLS.md
+  CLAUDE.md
+  helper.py
+  .nono-trust.bundle           # contains all subjects
+  trust-policy.json
+  trust-policy.json.bundle
+```
+
+Multi-subject bundles are more efficient for projects with many instruction files. The bundle contains cryptographic digests for each subject file, and a single signature covers all of them.
 
 Bundles are checked into version control. A missing bundle for a file that matches instruction patterns triggers verification failure.
 

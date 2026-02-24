@@ -660,6 +660,8 @@ pub enum TrustCommands {
     List(TrustListArgs),
     /// Generate a new ECDSA P-256 signing key pair
     Keygen(TrustKeygenArgs),
+    /// Export the public key for a signing key (base64 DER)
+    ExportKey(TrustExportKeyArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -730,6 +732,17 @@ pub struct TrustKeygenArgs {
     /// Overwrite existing key with the same ID
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct TrustExportKeyArgs {
+    /// Key identifier to export (default: "default")
+    #[arg(long, value_name = "NAME", default_value = "default")]
+    pub id: String,
+
+    /// Output as PEM instead of base64 DER
+    #[arg(long)]
+    pub pem: bool,
 }
 
 #[cfg(test)]
@@ -1097,6 +1110,36 @@ mod tests {
                     assert!(keygen_args.force);
                 }
                 _ => panic!("Expected Keygen subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_export_key_defaults() {
+        let cli = Cli::parse_from(["nono", "trust", "export-key"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::ExportKey(export_args) => {
+                    assert_eq!(export_args.id, "default");
+                    assert!(!export_args.pem);
+                }
+                _ => panic!("Expected ExportKey subcommand"),
+            },
+            _ => panic!("Expected Trust command"),
+        }
+    }
+
+    #[test]
+    fn test_trust_export_key_with_options() {
+        let cli = Cli::parse_from(["nono", "trust", "export-key", "--id", "my-key", "--pem"]);
+        match cli.command {
+            Commands::Trust(args) => match args.command {
+                TrustCommands::ExportKey(export_args) => {
+                    assert_eq!(export_args.id, "my-key");
+                    assert!(export_args.pem);
+                }
+                _ => panic!("Expected ExportKey subcommand"),
             },
             _ => panic!("Expected Trust command"),
         }

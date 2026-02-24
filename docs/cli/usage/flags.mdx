@@ -62,6 +62,22 @@ Set up nono on this system. Verifies installation, tests sandbox support, and op
 nono setup [OPTIONS]
 ```
 
+### `nono trust`
+
+Manage instruction file attestation. Sign, verify, and manage trust for AI agent instruction files.
+
+```bash
+nono trust <SUBCOMMAND>
+```
+
+Subcommands:
+- `sign` - Sign instruction files
+- `sign-policy` - Sign a trust policy file
+- `verify` - Verify instruction files against the trust policy
+- `list` - List instruction files and their verification status
+- `keygen` - Generate a new signing key pair
+- `export-key` - Export the public key for a signing key
+
 ## `nono learn` Options
 
 <Note>
@@ -527,6 +543,77 @@ Available context flags:
 - `--net-block` - Block network access
 - `--profile`, `-p` - Use a named profile
 - `--workdir` - Working directory for `$WORKDIR` expansion
+
+## `nono trust` Options
+
+### `nono trust sign`
+
+Sign instruction files, producing bundles for verification.
+
+```bash
+nono trust sign <FILES...>                 # Sign specific files
+nono trust sign --all                      # Sign all instruction files in CWD
+nono trust sign SKILLS.md --key my-key     # Use a specific key
+```
+
+| Option | Description |
+|--------|-------------|
+| `--all` | Sign all instruction files matching trust policy patterns |
+| `--key <KEY_ID>` | Key ID from system keystore (default: "default") |
+| `--keyless` | Use Sigstore keyless signing (CI environments only) |
+| `--policy <FILE>` | Trust policy file (default: auto-discover) |
+
+<Note>
+  When signing multiple files, a single `.nono-trust.bundle` multi-subject bundle is created. Single-file signing creates per-file `.bundle` sidecars.
+</Note>
+
+### `nono trust sign-policy`
+
+Sign a trust policy file.
+
+```bash
+nono trust sign-policy                     # Sign trust-policy.json in CWD
+nono trust sign-policy path/to/policy.json # Sign specific file
+nono trust sign-policy --key my-key        # Use a specific key
+```
+
+### `nono trust verify`
+
+Verify instruction files against the trust policy.
+
+```bash
+nono trust verify <FILES...>               # Verify specific files
+nono trust verify --all                    # Verify all instruction files in CWD
+nono trust verify --policy path/to/policy  # Use specific trust policy
+```
+
+### `nono trust list`
+
+List instruction files and their verification status.
+
+```bash
+nono trust list                            # Human-readable output
+nono trust list --json                     # JSON output
+```
+
+### `nono trust keygen`
+
+Generate an ECDSA P-256 signing key pair and store it in the system keystore.
+
+```bash
+nono trust keygen                          # Default key ID ("default")
+nono trust keygen --id my-signing-key      # Named key
+```
+
+### `nono trust export-key`
+
+Export the public key for use in trust policy `public_key` fields.
+
+```bash
+nono trust export-key                      # Export default key (base64 DER)
+nono trust export-key --id my-key          # Export named key
+nono trust export-key --pem                # Output as PEM format
+```
 
 ## `nono setup` Options
 

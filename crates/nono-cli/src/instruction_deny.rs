@@ -145,7 +145,9 @@ pub fn glob_to_seatbelt_regex(pattern: &str) -> Result<String> {
 ///
 /// For each pattern in the trust policy's `instruction_patterns`, adds a
 /// Seatbelt `(deny file-read-data (regex ...))` rule. For each verified
-/// file path, adds a `(allow file-read-data (literal ...))` override.
+/// file path, adds:
+/// - `(allow file-read-data (literal ...))` to permit reading
+/// - `(deny file-write-data (literal ...))` to prevent modification
 ///
 /// On macOS, handles symlinks by emitting rules for both the original
 /// path and the canonical path when they differ (e.g., `/tmp/` vs
@@ -169,9 +171,10 @@ pub fn inject_instruction_deny_rules(
         caps.add_platform_rule(deny_rule)?;
     }
 
-    // Add literal allows for verified files
+    // Add literal allows (read) and denies (write) for verified files
     for path in verified_paths {
         add_literal_allow(caps, path)?;
+        add_literal_write_deny(caps, path)?;
     }
 
     Ok(())
@@ -216,6 +219,35 @@ fn add_literal_allow(caps: &mut CapabilitySet, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Add a `(deny file-write-data (literal ...))` rule for a verified instruction file.
+///
+/// This prevents modification of signed instruction files even when the parent
+/// directory has write access granted. The deny rule takes precedence over
+/// directory-level `(allow file-write* (subpath ...))` rules.
+///
+/// On macOS, handles symlinks by emitting rules for both the original path
+/// and the canonical path when they differ.
+#[cfg(target_os = "macos")]
+fn add_literal_write_deny(caps: &mut CapabilitySet, path: &Path) -> Result<()> {
+    let path_str = path.display().to_string();
+    validate_seatbelt_path(&path_str)?;
+
+    let deny_rule = format!("(deny file-write-data (literal \"{path_str}\"))");
+    caps.add_platform_rule(deny_rule)?;
+
+    // Handle macOS symlinks: emit rule for canonical path too
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        if canonical != path {
+            let canonical_str = canonical.display().to_string();
+            validate_seatbelt_path(&canonical_str)?;
+            let canonical_rule = format!("(deny file-write-data (literal \"{canonical_str}\"))");
+            caps.add_platform_rule(canonical_rule)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Reject paths containing characters that would break out of Seatbelt string literals.
 ///
 /// On macOS/HFS+, `"` is legal in filenames but would terminate a Seatbelt `(literal "...")`
@@ -241,21 +273,27 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn glob_skills_star() {
-        let rule = glob_to_seatbelt_regex("SKILLS*").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/SKILLS[^/]*$\"))");
+    fn glob_skills_star_md() {
+        let rule = glob_to_seatbelt_regex("SKILLS*.md").unwrap();
+        assert_eq!(
+            rule,
+            "(deny file-read-data (regex #\"/SKILLS[^/]*\\.md$\"))"
+        );
     }
 
     #[test]
-    fn glob_claude_star() {
-        let rule = glob_to_seatbelt_regex("CLAUDE*").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/CLAUDE[^/]*$\"))");
+    fn glob_claude_star_md() {
+        let rule = glob_to_seatbelt_regex("CLAUDE*.md").unwrap();
+        assert_eq!(
+            rule,
+            "(deny file-read-data (regex #\"/CLAUDE[^/]*\\.md$\"))"
+        );
     }
 
     #[test]
-    fn glob_agent_md() {
-        let rule = glob_to_seatbelt_regex("AGENT.MD").unwrap();
-        assert_eq!(rule, "(deny file-read-data (regex #\"/AGENT\\.MD$\"))");
+    fn glob_agent_star_md() {
+        let rule = glob_to_seatbelt_regex("AGENT*.md").unwrap();
+        assert_eq!(rule, "(deny file-read-data (regex #\"/AGENT[^/]*\\.md$\"))");
     }
 
     #[test]
@@ -365,19 +403,5 @@ mod tests {
 
         #[cfg(not(target_os = "macos"))]
         assert!(caps.platform_rules().is_empty());
-    }
-
-    #[test]
-    fn default_policy_patterns_all_convert() {
-        // Verify all default patterns from TrustPolicy::default() convert without error
-        let policy = TrustPolicy::default();
-        for pattern in &policy.instruction_patterns {
-            let result = glob_to_seatbelt_regex(pattern);
-            assert!(
-                result.is_ok(),
-                "failed to convert pattern '{pattern}': {:?}",
-                result.err()
-            );
-        }
     }
 }
