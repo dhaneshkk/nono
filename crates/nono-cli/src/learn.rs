@@ -6,6 +6,7 @@
 use crate::cli::LearnArgs;
 use nono::{NonoError, Result};
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
@@ -14,8 +15,6 @@ use crate::profile::{self, Profile};
 use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
-#[cfg(target_os = "linux")]
-use std::net::IpAddr;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -1162,6 +1161,7 @@ fn resolve_reverse_dns(ips: &HashSet<IpAddr>) -> HashMap<IpAddr, String> {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
