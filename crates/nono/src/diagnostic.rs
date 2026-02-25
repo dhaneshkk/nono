@@ -360,10 +360,17 @@ impl<'a> DiagnosticFormatter<'a> {
 
     /// Format the network status.
     fn format_network_status(&self, lines: &mut Vec<String>) {
-        if self.caps.is_network_blocked() {
-            lines.push("[nono]   Network: blocked".to_string());
-        } else {
-            lines.push("[nono]   Network: allowed".to_string());
+        use crate::NetworkMode;
+        match self.caps.network_mode() {
+            NetworkMode::Blocked => {
+                lines.push("[nono]   Network: blocked".to_string());
+            }
+            NetworkMode::ProxyOnly { port } => {
+                lines.push(format!("[nono]   Network: proxy (localhost:{})", port));
+            }
+            NetworkMode::AllowAll => {
+                lines.push("[nono]   Network: allowed".to_string());
+            }
         }
     }
 
@@ -542,6 +549,24 @@ mod tests {
         let output = formatter.format_footer(1);
 
         assert!(output.contains("Network: allowed"));
+    }
+
+    #[test]
+    fn test_standard_footer_shows_network_proxy() {
+        use crate::NetworkMode;
+        let mut caps = CapabilitySet::new().block_network();
+        caps.set_network_mode_mut(NetworkMode::ProxyOnly { port: 12345 });
+        caps.add_fs(FsCapability {
+            original: PathBuf::from("/test/project"),
+            resolved: PathBuf::from("/test/project"),
+            access: AccessMode::ReadWrite,
+            is_file: false,
+            source: CapabilitySource::User,
+        });
+        let formatter = DiagnosticFormatter::new(&caps);
+        let output = formatter.format_footer(1);
+
+        assert!(output.contains("Network: proxy (localhost:12345)"));
     }
 
     #[test]

@@ -48,6 +48,14 @@ pub struct ReverseProxyCtx<'a> {
 /// `buffered_body` contains any bytes the BufReader read ahead beyond the
 /// headers. These are prepended to the body read from the stream to prevent
 /// data loss.
+///
+/// ## Phantom Token Pattern
+///
+/// The client (SDK) sends the session token as its "API key". The proxy:
+/// 1. Extracts the service from the path (e.g., `/openai/v1/chat` → `openai`)
+/// 2. Looks up which header that service uses (e.g., `Authorization` or `x-api-key`)
+/// 3. Validates the phantom token from that header
+/// 4. Replaces it with the real credential from keyring
 pub async fn handle_reverse_proxy(
     first_line: &str,
     stream: &mut TcpStream,
@@ -59,9 +67,6 @@ pub async fn handle_reverse_proxy(
     let (method, path, version) = parse_request_line(first_line)?;
     debug!("Reverse proxy: {} {}", method, path);
 
-    // Validate session token from X-Nono-Token header
-    validate_nono_token(remaining_header, ctx.session_token)?;
-
     // Extract service prefix from path (e.g., "/openai/v1/chat" -> ("openai", "/v1/chat"))
     let (service, upstream_path) = parse_service_prefix(&path)?;
 
@@ -72,6 +77,11 @@ pub async fn handle_reverse_proxy(
         .ok_or_else(|| ProxyError::UnknownService {
             prefix: service.clone(),
         })?;
+
+    // Validate phantom token from the auth header the SDK uses.
+    // The SDK sends the session token as its "API key"; we validate it here
+    // before swapping in the real credential.
+    validate_phantom_token(remaining_header, &cred.header_name, ctx.session_token)?;
 
     // Parse upstream URL
     let upstream_url = format!("{}{}", cred.upstream.trim_end_matches('/'), upstream_path);
@@ -227,42 +237,66 @@ fn parse_service_prefix(path: &str) -> Result<(String, String)> {
     }
 }
 
-/// Validate the X-Nono-Token header.
-fn validate_nono_token(header_bytes: &[u8], session_token: &Zeroizing<String>) -> Result<()> {
+/// Validate the phantom token from the service's auth header.
+///
+/// The SDK sends the session token as its "API key" in the standard auth header
+/// for that service (e.g., `Authorization: Bearer <token>` for OpenAI,
+/// `x-api-key: <token>` for Anthropic). We validate the token matches the
+/// session token before swapping in the real credential.
+fn validate_phantom_token(
+    header_bytes: &[u8],
+    header_name: &str,
+    session_token: &Zeroizing<String>,
+) -> Result<()> {
     let header_str = std::str::from_utf8(header_bytes).map_err(|_| ProxyError::InvalidToken)?;
+    let header_name_lower = header_name.to_lowercase();
 
     for line in header_str.lines() {
         let lower = line.to_lowercase();
-        if lower.starts_with("x-nono-token:") {
+        if lower.starts_with(&format!("{}:", header_name_lower)) {
             let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
-            if token::constant_time_eq(value.as_bytes(), session_token.as_bytes()) {
+
+            // Handle "Bearer <token>" format (strip "Bearer " prefix if present)
+            // Use case-insensitive check, then slice original value by length
+            let value_lower = value.to_lowercase();
+            let token_value = if value_lower.starts_with("bearer ") {
+                // "bearer ".len() == 7
+                value[7..].trim()
+            } else {
+                value
+            };
+
+            if token::constant_time_eq(token_value.as_bytes(), session_token.as_bytes()) {
                 return Ok(());
             }
-            warn!("Invalid X-Nono-Token");
+            warn!("Invalid phantom token in {} header", header_name);
             return Err(ProxyError::InvalidToken);
         }
     }
 
-    warn!("Missing X-Nono-Token header");
+    warn!(
+        "Missing {} header for phantom token validation",
+        header_name
+    );
     Err(ProxyError::InvalidToken)
 }
 
-/// Filter headers, removing X-Nono-Token, Host, Content-Length, and x-api-key.
+/// Filter headers, removing Host, Content-Length, and auth headers.
 ///
 /// Content-Length is re-added after body is read, and Host is rewritten
 /// to the upstream. Authorization and x-api-key headers are stripped since
-/// we inject our own credential.
+/// we inject our own credential (the phantom token is validated but not forwarded).
 fn filter_headers(header_bytes: &[u8]) -> Vec<(String, String)> {
     let header_str = std::str::from_utf8(header_bytes).unwrap_or("");
     let mut headers = Vec::new();
 
     for line in header_str.lines() {
         let lower = line.to_lowercase();
-        if lower.starts_with("x-nono-token:")
-            || lower.starts_with("host:")
+        if lower.starts_with("host:")
             || lower.starts_with("content-length:")
             || lower.starts_with("authorization:")
             || lower.starts_with("x-api-key:")
+            || lower.starts_with("x-goog-api-key:")
             || line.trim().is_empty()
         {
             continue;
@@ -472,29 +506,50 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_nono_token_valid() {
+    fn test_validate_phantom_token_bearer_valid() {
         let token = Zeroizing::new("secret123".to_string());
-        let header = b"X-Nono-Token: secret123\r\nContent-Type: application/json\r\n\r\n";
-        assert!(validate_nono_token(header, &token).is_ok());
+        let header = b"Authorization: Bearer secret123\r\nContent-Type: application/json\r\n\r\n";
+        assert!(validate_phantom_token(header, "Authorization", &token).is_ok());
     }
 
     #[test]
-    fn test_validate_nono_token_invalid() {
+    fn test_validate_phantom_token_bearer_invalid() {
         let token = Zeroizing::new("secret123".to_string());
-        let header = b"X-Nono-Token: wrong\r\n\r\n";
-        assert!(validate_nono_token(header, &token).is_err());
+        let header = b"Authorization: Bearer wrong\r\n\r\n";
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
     }
 
     #[test]
-    fn test_validate_nono_token_missing() {
+    fn test_validate_phantom_token_x_api_key_valid() {
+        let token = Zeroizing::new("secret123".to_string());
+        let header = b"x-api-key: secret123\r\nContent-Type: application/json\r\n\r\n";
+        assert!(validate_phantom_token(header, "x-api-key", &token).is_ok());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_x_goog_api_key_valid() {
+        let token = Zeroizing::new("secret123".to_string());
+        let header = b"x-goog-api-key: secret123\r\nContent-Type: application/json\r\n\r\n";
+        assert!(validate_phantom_token(header, "x-goog-api-key", &token).is_ok());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_missing() {
         let token = Zeroizing::new("secret123".to_string());
         let header = b"Content-Type: application/json\r\n\r\n";
-        assert!(validate_nono_token(header, &token).is_err());
+        assert!(validate_phantom_token(header, "Authorization", &token).is_err());
     }
 
     #[test]
-    fn test_filter_headers_removes_token_host_auth() {
-        let header = b"X-Nono-Token: secret\r\nHost: localhost:8080\r\nAuthorization: Bearer old\r\nContent-Type: application/json\r\nAccept: */*\r\n\r\n";
+    fn test_validate_phantom_token_case_insensitive_header() {
+        let token = Zeroizing::new("secret123".to_string());
+        let header = b"AUTHORIZATION: Bearer secret123\r\n\r\n";
+        assert!(validate_phantom_token(header, "Authorization", &token).is_ok());
+    }
+
+    #[test]
+    fn test_filter_headers_removes_host_auth() {
+        let header = b"Host: localhost:8080\r\nAuthorization: Bearer old\r\nContent-Type: application/json\r\nAccept: */*\r\n\r\n";
         let filtered = filter_headers(header);
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].0, "Content-Type");
@@ -504,6 +559,14 @@ mod tests {
     #[test]
     fn test_filter_headers_removes_x_api_key() {
         let header = b"x-api-key: sk-old\r\nContent-Type: application/json\r\n\r\n";
+        let filtered = filter_headers(header);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "Content-Type");
+    }
+
+    #[test]
+    fn test_filter_headers_removes_x_goog_api_key() {
+        let header = b"x-goog-api-key: gemini-key\r\nContent-Type: application/json\r\n\r\n";
         let filtered = filter_headers(header);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, "Content-Type");

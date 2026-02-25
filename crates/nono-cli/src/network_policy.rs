@@ -47,10 +47,13 @@ pub struct NetworkGroup {
     pub suffixes: Vec<String>,
 }
 
-/// A network profile composing groups
+/// A network profile composing groups and optional credentials
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkProfileDef {
     pub groups: Vec<String>,
+    /// Credential services to automatically enable with this profile
+    #[serde(default)]
+    pub credentials: Vec<String>,
 }
 
 /// A credential route definition
@@ -85,6 +88,8 @@ pub struct ResolvedNetworkPolicy {
     pub suffixes: Vec<String>,
     /// Credential routes for reverse proxy mode
     pub routes: Vec<RouteConfig>,
+    /// Credential service names from the profile (to be resolved later)
+    pub profile_credentials: Vec<String>,
 }
 
 /// Load network policy from JSON string
@@ -96,7 +101,8 @@ pub fn load_network_policy(json: &str) -> Result<NetworkPolicy> {
 /// Resolve a network profile name into flat host lists and routes.
 ///
 /// Merges all groups referenced by the profile into a single set of
-/// allowed hosts and suffixes. Deduplicates entries.
+/// allowed hosts and suffixes. Deduplicates entries. Also returns
+/// any credentials bundled with the profile.
 pub fn resolve_network_profile(
     policy: &NetworkPolicy,
     profile_name: &str,
@@ -108,7 +114,9 @@ pub fn resolve_network_profile(
         ))
     })?;
 
-    resolve_groups(policy, &profile.groups)
+    let mut resolved = resolve_groups(policy, &profile.groups)?;
+    resolved.profile_credentials = profile.credentials.clone();
+    Ok(resolved)
 }
 
 /// Resolve a list of group names into flat host lists.
@@ -143,6 +151,7 @@ pub fn resolve_groups(
         hosts,
         suffixes,
         routes: Vec::new(),
+        profile_credentials: Vec::new(),
     })
 }
 
@@ -150,9 +159,25 @@ pub fn resolve_groups(
 ///
 /// Only includes credentials whose service name is in the given list.
 /// If `service_names` is empty, returns no routes (no credential injection).
-pub fn resolve_credentials(policy: &NetworkPolicy, service_names: &[String]) -> Vec<RouteConfig> {
+///
+/// Returns an error if any requested service name is not defined in the policy.
+pub fn resolve_credentials(
+    policy: &NetworkPolicy,
+    service_names: &[String],
+) -> Result<Vec<RouteConfig>> {
     if service_names.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+
+    // Validate all requested services exist
+    for name in service_names {
+        if !policy.credentials.contains_key(name) {
+            let available: Vec<_> = policy.credentials.keys().collect();
+            return Err(NonoError::ConfigParse(format!(
+                "Unknown credential service '{}'. Available: {:?}",
+                name, available
+            )));
+        }
     }
 
     let mut routes = Vec::new();
@@ -170,7 +195,7 @@ pub fn resolve_credentials(policy: &NetworkPolicy, service_names: &[String]) -> 
         });
     }
 
-    routes
+    Ok(routes)
 }
 
 /// Build a complete `ProxyConfig` from a resolved network policy.
@@ -255,7 +280,7 @@ mod tests {
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).unwrap();
         // Empty service list = no credential injection
-        let routes = resolve_credentials(&policy, &[]);
+        let routes = resolve_credentials(&policy, &[]).unwrap();
         assert!(routes.is_empty());
     }
 
@@ -263,20 +288,32 @@ mod tests {
     fn test_resolve_credentials_by_name() {
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).unwrap();
-        let routes = resolve_credentials(&policy, &["openai".to_string(), "anthropic".to_string()]);
+        let routes =
+            resolve_credentials(&policy, &["openai".to_string(), "anthropic".to_string()]).unwrap();
         assert!(!routes.is_empty());
         let openai_route = routes.iter().find(|r| r.prefix == "openai");
         assert!(openai_route.is_some());
-        assert_eq!(openai_route.unwrap().upstream, "https://api.openai.com");
+        assert_eq!(openai_route.unwrap().upstream, "https://api.openai.com/v1");
     }
 
     #[test]
     fn test_resolve_credentials_filtered() {
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).unwrap();
-        let routes = resolve_credentials(&policy, &["openai".to_string()]);
+        let routes = resolve_credentials(&policy, &["openai".to_string()]).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "openai");
+    }
+
+    #[test]
+    fn test_resolve_credentials_unknown_service_fails() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+        let result = resolve_credentials(&policy, &["nonexistent_service".to_string()]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent_service"));
+        assert!(err.contains("Unknown credential service"));
     }
 
     #[test]
@@ -285,6 +322,7 @@ mod tests {
             hosts: vec!["api.openai.com".to_string()],
             suffixes: vec![".googleapis.com".to_string()],
             routes: vec![],
+            profile_credentials: vec![],
         };
         let config = build_proxy_config(&resolved, &["extra.example.com".to_string()]);
         assert!(config.allowed_hosts.contains(&"api.openai.com".to_string()));

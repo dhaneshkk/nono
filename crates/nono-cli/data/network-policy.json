@@ -48,6 +48,7 @@
       "hosts": [
         "github.com",
         "api.github.com",
+        "codeload.github.com",
         "raw.githubusercontent.com",
         "objects.githubusercontent.com",
         "github-releases.githubusercontent.com",
@@ -99,6 +100,25 @@
     }
   },
   "profiles": {
+    "opencode": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ],
+      "credentials": ["google-ai"]
+    },
+    "developer": {
+      "groups": [
+        "llm_apis",
+        "package_registries",
+        "github",
+        "sigstore",
+        "documentation"
+      ]
+    },
     "claude-code": {
       "groups": [
         "llm_apis",
@@ -128,7 +148,7 @@
   },
   "credentials": {
     "openai": {
-      "upstream": "https://api.openai.com",
+      "upstream": "https://api.openai.com/v1",
       "credential_key": "openai_api_key",
       "inject_header": "Authorization",
       "credential_format": "Bearer {}"
@@ -142,6 +162,12 @@
     "gemini": {
       "upstream": "https://generativelanguage.googleapis.com",
       "credential_key": "gemini_api_key",
+      "inject_header": "x-goog-api-key",
+      "credential_format": "{}"
+    },
+    "google-ai": {
+      "upstream": "https://generativelanguage.googleapis.com",
+      "credential_key": "google_generative_ai_api_key",
       "inject_header": "x-goog-api-key",
       "credential_format": "{}"
     }

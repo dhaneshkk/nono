@@ -75,14 +75,27 @@ impl ProxyHandle {
 
     /// Environment variables for reverse proxy credential routes.
     ///
-    /// Returns SDK-specific base URL overrides (e.g., OPENAI_BASE_URL).
+    /// Returns two types of env vars per route:
+    /// 1. SDK base URL overrides (e.g., `OPENAI_BASE_URL=http://127.0.0.1:PORT/openai`)
+    /// 2. SDK API key vars set to the session token (e.g., `OPENAI_API_KEY=<token>`)
+    ///
+    /// The SDK sends the session token as its "API key" (phantom token pattern).
+    /// The proxy validates this token and swaps it for the real credential.
     #[must_use]
     pub fn credential_env_vars(&self, config: &ProxyConfig) -> Vec<(String, String)> {
         let mut vars = Vec::new();
         for route in &config.routes {
-            let env_name = format!("{}_BASE_URL", route.prefix.to_uppercase());
+            // Base URL override (e.g., OPENAI_BASE_URL)
+            let base_url_name = format!("{}_BASE_URL", route.prefix.to_uppercase());
             let url = format!("http://127.0.0.1:{}/{}", self.port, route.prefix);
-            vars.push((env_name, url));
+            vars.push((base_url_name, url));
+
+            // API key set to session token (phantom token pattern)
+            // The credential_key (e.g., "openai_api_key") uppercased gives the env var name
+            if let Some(ref cred_key) = route.credential_key {
+                let api_key_name = cred_key.to_uppercase();
+                vars.push((api_key_name, self.token.to_string()));
+            }
         }
         vars
     }

@@ -548,6 +548,70 @@
         "exclude_patterns": ["node_modules", ".next"]
       },
       "interactive": true
+    },
+    "python-dev": {
+      "meta": {
+        "name": "python-dev",
+        "version": "1.0.0",
+        "description": "Python SDK development profile with pyenv, conda, and pip support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["python_runtime"]
+      },
+      "trust_groups": [],
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "node-dev": {
+      "meta": {
+        "name": "node-dev",
+        "version": "1.0.0",
+        "description": "Node.js SDK development profile with nvm, fnm, and npm support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["node_runtime"]
+      },
+      "trust_groups": [],
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "go-dev": {
+      "meta": {
+        "name": "go-dev",
+        "version": "1.0.0",
+        "description": "Go SDK development profile with GOPATH and module support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["go_runtime"]
+      },
+      "trust_groups": [],
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
+    },
+    "rust-dev": {
+      "meta": {
+        "name": "rust-dev",
+        "version": "1.0.0",
+        "description": "Rust SDK development profile with cargo and rustup support",
+        "author": "nono-project"
+      },
+      "security": {
+        "groups": ["rust_runtime"]
+      },
+      "trust_groups": [],
+      "filesystem": {},
+      "network": { "block": false },
+      "workdir": { "access": "readwrite" },
+      "interactive": false
     }
   }
 }

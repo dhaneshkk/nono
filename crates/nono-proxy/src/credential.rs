@@ -85,9 +85,12 @@ impl CredentialStore {
     }
 }
 
+/// The keyring service name used by nono for all credentials.
+const KEYRING_SERVICE: &str = "nono";
+
 /// Load a secret from the system keyring.
 fn load_from_keyring(account: &str) -> Result<Zeroizing<String>> {
-    let entry = keyring::Entry::new("nono-proxy", account).map_err(|e| {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| {
         ProxyError::Credential(format!(
             "failed to create keyring entry for '{}': {}",
             account, e

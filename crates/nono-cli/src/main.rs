@@ -577,11 +577,20 @@ fn build_proxy_config_from_flags(
             hosts: Vec::new(),
             suffixes: Vec::new(),
             routes: Vec::new(),
+            profile_credentials: Vec::new(),
         }
     };
 
-    // Resolve credential routes
-    let routes = network_policy::resolve_credentials(&net_policy, &flags.proxy_credentials);
+    // Merge profile credentials with CLI credentials (CLI takes precedence/adds to profile)
+    let mut all_credentials = resolved.profile_credentials.clone();
+    for cred in &flags.proxy_credentials {
+        if !all_credentials.contains(cred) {
+            all_credentials.push(cred.clone());
+        }
+    }
+
+    // Resolve credential routes (validates all services exist)
+    let routes = network_policy::resolve_credentials(&net_policy, &all_credentials)?;
     resolved.routes = routes;
 
     // Build the proxy config with extra hosts from CLI/profile
@@ -655,7 +664,12 @@ fn execute_sandboxed(
     let strategy = select_execution_strategy(&flags);
 
     if matches!(strategy, exec_strategy::ExecStrategy::Supervised) {
-        output::print_supervised_info(flags.silent, flags.rollback, flags.supervised);
+        output::print_supervised_info(
+            flags.silent,
+            flags.rollback,
+            flags.supervised,
+            flags.proxy_active,
+        );
     }
 
     // Start network proxy if proxy mode is active.
