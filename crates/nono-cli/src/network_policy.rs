@@ -5,7 +5,7 @@
 
 use crate::profile::CustomCredentialDef;
 use nono::{NonoError, Result};
-use nono_proxy::config::{ProxyConfig, RouteConfig};
+use nono_proxy::config::{InjectMode, ProxyConfig, RouteConfig};
 use serde::Deserialize;
 use std::collections::HashMap;
 use tracing::debug;
@@ -201,16 +201,25 @@ pub fn resolve_credentials(
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
                 credential_key: Some(cred.credential_key.clone()),
+                inject_mode: cred.inject_mode.clone(),
                 inject_header: cred.inject_header.clone(),
                 credential_format: cred.credential_format.clone(),
+                path_pattern: cred.path_pattern.clone(),
+                path_replacement: cred.path_replacement.clone(),
+                query_param_name: cred.query_param_name.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
+            // Built-in credentials always use header mode
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
                 credential_key: Some(cred.credential_key.clone()),
+                inject_mode: InjectMode::Header,
                 inject_header: cred.inject_header.clone(),
                 credential_format: cred.credential_format.clone(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             });
         }
         // We already validated existence above, so this else branch won't be hit
@@ -359,8 +368,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "https://api.telegram.org".to_string(),
                 credential_key: "telegram_bot_token".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -388,8 +401,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "https://my-proxy.example.com/openai".to_string(),
                 credential_key: "my_openai_key".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -413,8 +430,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "https://api.telegram.org".to_string(),
                 credential_key: "telegram_bot_token".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -448,8 +469,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "http://localhost:8080/api".to_string(),
                 credential_key: "local_api_key".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -519,8 +544,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "http://127.1.2.3:8080/api".to_string(),
                 credential_key: "local_api_key".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -541,8 +570,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "http://0.0.0.0:3000/api".to_string(),
                 credential_key: "local_api_key".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 
@@ -563,8 +596,12 @@ mod tests {
             CustomCredentialDef {
                 upstream: "https://api.example.com".to_string(),
                 credential_key: "api_key".to_string(),
+                inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             },
         );
 

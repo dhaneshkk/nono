@@ -3,13 +3,20 @@
 //! Routes requests by path prefix to upstream APIs, injecting credentials
 //! from the keystore. The agent uses `http://localhost:PORT/openai/v1/chat`
 //! and the proxy rewrites to `https://api.openai.com/v1/chat` with the
-//! real API key injected as a header.
+//! real credential injected.
+//!
+//! Supports multiple injection modes:
+//! - `header`: Inject into HTTP header (e.g., `Authorization: Bearer ...`)
+//! - `url_path`: Replace pattern in URL path (e.g., Telegram `/bot{}/`)
+//! - `query_param`: Add/replace query parameter (e.g., `?api_key=...`)
+//! - `basic_auth`: HTTP Basic Authentication
 //!
 //! Streaming responses (SSE, MCP Streamable HTTP, A2A JSON-RPC) are
 //! forwarded without buffering.
 
 use crate::audit;
-use crate::credential::CredentialStore;
+use crate::config::InjectMode;
+use crate::credential::{CredentialStore, LoadedCredential};
 use crate::error::{ProxyError, Result};
 use crate::filter::ProxyFilter;
 use crate::token;
@@ -78,13 +85,40 @@ pub async fn handle_reverse_proxy(
             prefix: service.clone(),
         })?;
 
-    // Validate phantom token from the auth header the SDK uses.
-    // The SDK sends the session token as its "API key"; we validate it here
-    // before swapping in the real credential.
-    validate_phantom_token(remaining_header, &cred.header_name, ctx.session_token)?;
+    // Validate phantom token based on injection mode.
+    // For header/basic_auth modes: validate from Authorization/x-api-key header
+    // For url_path mode: validate from URL path pattern
+    // For query_param mode: validate from query parameter
+    if let Err(e) = validate_phantom_token_for_mode(
+        &cred.inject_mode,
+        remaining_header,
+        &upstream_path,
+        &cred.header_name,
+        cred.path_pattern.as_deref(),
+        cred.query_param_name.as_deref(),
+        ctx.session_token,
+    ) {
+        audit::log_denied(audit::ProxyMode::Reverse, &service, 0, &e.to_string());
+        send_error(stream, 401, "Unauthorized").await?;
+        return Ok(());
+    }
 
-    // Parse upstream URL
-    let upstream_url = format!("{}{}", cred.upstream.trim_end_matches('/'), upstream_path);
+    // Transform the path based on injection mode (url_path and query_param modes)
+    let transformed_path = transform_path_for_mode(
+        &cred.inject_mode,
+        &upstream_path,
+        cred.path_pattern.as_deref(),
+        cred.path_replacement.as_deref(),
+        cred.query_param_name.as_deref(),
+        &cred.raw_credential,
+    )?;
+
+    // Parse upstream URL with potentially transformed path
+    let upstream_url = format!(
+        "{}{}",
+        cred.upstream.trim_end_matches('/'),
+        transformed_path
+    );
     debug!("Forwarding to upstream: {} {}", method, upstream_url);
 
     let (upstream_host, upstream_port, upstream_path_full) = parse_upstream_url(&upstream_url)?;
@@ -143,23 +177,27 @@ pub async fn handle_reverse_proxy(
         }
     };
 
-    // Build the upstream request into a Zeroizing buffer since it contains
-    // the credential header value. This ensures the credential is zeroed
-    // from heap memory when the buffer is dropped.
+    // Build the upstream request into a Zeroizing buffer since it may contain
+    // credential values. This ensures credentials are zeroed from heap memory
+    // when the buffer is dropped.
     let mut request = Zeroizing::new(format!(
         "{} {} {}\r\nHost: {}\r\n",
         method, upstream_path_full, version, upstream_host
     ));
 
-    // Inject credential header
-    request.push_str(&format!(
-        "{}: {}\r\n",
-        cred.header_name,
-        cred.header_value.as_str()
-    ));
+    // Inject credential based on mode
+    inject_credential_for_mode(cred, &mut request);
 
-    // Forward filtered headers
+    // Forward filtered headers (excluding auth headers that we're replacing)
+    let auth_header_lower = cred.header_name.to_lowercase();
     for (name, value) in &filtered_headers {
+        // Skip the auth header if we're using header/basic_auth mode
+        // (we already injected our own)
+        if matches!(cred.inject_mode, InjectMode::Header | InjectMode::BasicAuth)
+            && name.to_lowercase() == auth_header_lower
+        {
+            continue;
+        }
         request.push_str(&format!("{}: {}\r\n", name, value));
     }
 
@@ -349,7 +387,14 @@ fn parse_upstream_url(url_str: &str) -> Result<(String, u16, String)> {
         path
     };
 
-    Ok((host, port, path))
+    // Include query string if present
+    let path_with_query = if let Some(query) = parsed.query() {
+        format!("{}?{}", path, query)
+    } else {
+        path
+    };
+
+    Ok((host, port, path_with_query))
 }
 
 /// Connect to an upstream host over TLS using pre-resolved addresses.
@@ -471,6 +516,292 @@ async fn send_error(stream: &mut TcpStream, status: u16, reason: &str) -> Result
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+// ============================================================================
+// Injection mode helpers
+// ============================================================================
+
+/// Validate phantom token based on injection mode.
+///
+/// Different modes extract the phantom token from different locations:
+/// - `Header`/`BasicAuth`: From the auth header (Authorization, x-api-key, etc.)
+/// - `UrlPath`: From the URL path pattern (e.g., `/bot<token>/getMe`)
+/// - `QueryParam`: From the query parameter (e.g., `?api_key=<token>`)
+fn validate_phantom_token_for_mode(
+    mode: &InjectMode,
+    header_bytes: &[u8],
+    path: &str,
+    header_name: &str,
+    path_pattern: Option<&str>,
+    query_param_name: Option<&str>,
+    session_token: &Zeroizing<String>,
+) -> Result<()> {
+    match mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            // Validate from header (existing behavior)
+            validate_phantom_token(header_bytes, header_name, session_token)
+        }
+        InjectMode::UrlPath => {
+            // Validate from URL path
+            let pattern = path_pattern.ok_or_else(|| {
+                ProxyError::HttpParse("url_path mode requires path_pattern".to_string())
+            })?;
+            validate_phantom_token_in_path(path, pattern, session_token)
+        }
+        InjectMode::QueryParam => {
+            // Validate from query parameter
+            let param_name = query_param_name.ok_or_else(|| {
+                ProxyError::HttpParse("query_param mode requires query_param_name".to_string())
+            })?;
+            validate_phantom_token_in_query(path, param_name, session_token)
+        }
+    }
+}
+
+/// Validate phantom token embedded in URL path.
+///
+/// Extracts the token from the path using the pattern (e.g., `/bot{}/` matches
+/// `/bot<token>/getMe` and extracts `<token>`).
+fn validate_phantom_token_in_path(
+    path: &str,
+    pattern: &str,
+    session_token: &Zeroizing<String>,
+) -> Result<()> {
+    // Split pattern on {} to get prefix and suffix
+    let parts: Vec<&str> = pattern.split("{}").collect();
+    if parts.len() != 2 {
+        return Err(ProxyError::HttpParse(format!(
+            "invalid path_pattern '{}': must contain exactly one {{}}",
+            pattern
+        )));
+    }
+    let (prefix, suffix) = (parts[0], parts[1]);
+
+    // Find the token in the path
+    if let Some(start) = path.find(prefix) {
+        let after_prefix = start + prefix.len();
+
+        // Handle empty suffix case (token extends to end of path or next '/' or '?')
+        let end_offset = if suffix.is_empty() {
+            path[after_prefix..]
+                .find(['/', '?'])
+                .unwrap_or(path[after_prefix..].len())
+        } else {
+            match path[after_prefix..].find(suffix) {
+                Some(offset) => offset,
+                None => {
+                    warn!("Missing phantom token in URL path (pattern: {})", pattern);
+                    return Err(ProxyError::InvalidToken);
+                }
+            }
+        };
+
+        let token = &path[after_prefix..after_prefix + end_offset];
+        if token::constant_time_eq(token.as_bytes(), session_token.as_bytes()) {
+            return Ok(());
+        }
+        warn!("Invalid phantom token in URL path");
+        return Err(ProxyError::InvalidToken);
+    }
+
+    warn!("Missing phantom token in URL path (pattern: {})", pattern);
+    Err(ProxyError::InvalidToken)
+}
+
+/// Validate phantom token in query parameter.
+fn validate_phantom_token_in_query(
+    path: &str,
+    param_name: &str,
+    session_token: &Zeroizing<String>,
+) -> Result<()> {
+    // Parse query string from path
+    if let Some(query_start) = path.find('?') {
+        let query = &path[query_start + 1..];
+        for pair in query.split('&') {
+            if let Some((name, value)) = pair.split_once('=') {
+                if name == param_name {
+                    // URL-decode the value
+                    let decoded = urlencoding::decode(value).unwrap_or_else(|_| value.into());
+                    if token::constant_time_eq(decoded.as_bytes(), session_token.as_bytes()) {
+                        return Ok(());
+                    }
+                    warn!("Invalid phantom token in query parameter '{}'", param_name);
+                    return Err(ProxyError::InvalidToken);
+                }
+            }
+        }
+    }
+
+    warn!("Missing phantom token in query parameter '{}'", param_name);
+    Err(ProxyError::InvalidToken)
+}
+
+/// Transform URL path based on injection mode.
+///
+/// - `UrlPath`: Replace phantom token with real credential in path
+/// - `QueryParam`: Add/replace query parameter with real credential
+/// - `Header`/`BasicAuth`: No path transformation needed
+fn transform_path_for_mode(
+    mode: &InjectMode,
+    path: &str,
+    path_pattern: Option<&str>,
+    path_replacement: Option<&str>,
+    query_param_name: Option<&str>,
+    credential: &Zeroizing<String>,
+) -> Result<String> {
+    match mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            // No path transformation needed
+            Ok(path.to_string())
+        }
+        InjectMode::UrlPath => {
+            let pattern = path_pattern.ok_or_else(|| {
+                ProxyError::HttpParse("url_path mode requires path_pattern".to_string())
+            })?;
+            let replacement = path_replacement.unwrap_or(pattern);
+            transform_url_path(path, pattern, replacement, credential)
+        }
+        InjectMode::QueryParam => {
+            let param_name = query_param_name.ok_or_else(|| {
+                ProxyError::HttpParse("query_param mode requires query_param_name".to_string())
+            })?;
+            transform_query_param(path, param_name, credential)
+        }
+    }
+}
+
+/// Transform URL path by replacing phantom token pattern with real credential.
+///
+/// Example: `/bot<phantom>/getMe` with pattern `/bot{}/` becomes `/bot<real>/getMe`
+fn transform_url_path(
+    path: &str,
+    pattern: &str,
+    replacement: &str,
+    credential: &Zeroizing<String>,
+) -> Result<String> {
+    // Split pattern on {} to get prefix and suffix
+    let parts: Vec<&str> = pattern.split("{}").collect();
+    if parts.len() != 2 {
+        return Err(ProxyError::HttpParse(format!(
+            "invalid path_pattern '{}': must contain exactly one {{}}",
+            pattern
+        )));
+    }
+    let (pattern_prefix, pattern_suffix) = (parts[0], parts[1]);
+
+    // Split replacement on {}
+    let repl_parts: Vec<&str> = replacement.split("{}").collect();
+    if repl_parts.len() != 2 {
+        return Err(ProxyError::HttpParse(format!(
+            "invalid path_replacement '{}': must contain exactly one {{}}",
+            replacement
+        )));
+    }
+    let (repl_prefix, repl_suffix) = (repl_parts[0], repl_parts[1]);
+
+    // Find and replace the token in the path
+    if let Some(start) = path.find(pattern_prefix) {
+        let after_prefix = start + pattern_prefix.len();
+
+        // Handle empty suffix case (token extends to end of path or next '/' or '?')
+        let end_offset = if pattern_suffix.is_empty() {
+            // Find the next path segment delimiter or end of path
+            path[after_prefix..]
+                .find(['/', '?'])
+                .unwrap_or(path[after_prefix..].len())
+        } else {
+            // Find the suffix in the remaining path
+            match path[after_prefix..].find(pattern_suffix) {
+                Some(offset) => offset,
+                None => {
+                    return Err(ProxyError::HttpParse(format!(
+                        "path '{}' does not match pattern '{}'",
+                        path, pattern
+                    )));
+                }
+            }
+        };
+
+        let before = &path[..start];
+        let after = &path[after_prefix + end_offset + pattern_suffix.len()..];
+        return Ok(format!(
+            "{}{}{}{}{}",
+            before,
+            repl_prefix,
+            credential.as_str(),
+            repl_suffix,
+            after
+        ));
+    }
+
+    Err(ProxyError::HttpParse(format!(
+        "path '{}' does not match pattern '{}'",
+        path, pattern
+    )))
+}
+
+/// Transform query string by adding or replacing a parameter with the credential.
+fn transform_query_param(
+    path: &str,
+    param_name: &str,
+    credential: &Zeroizing<String>,
+) -> Result<String> {
+    let encoded_value = urlencoding::encode(credential.as_str());
+
+    if let Some(query_start) = path.find('?') {
+        let base_path = &path[..query_start];
+        let query = &path[query_start + 1..];
+
+        // Check if parameter already exists
+        let mut found = false;
+        let new_query: Vec<String> = query
+            .split('&')
+            .map(|pair| {
+                if let Some((name, _)) = pair.split_once('=') {
+                    if name == param_name {
+                        found = true;
+                        return format!("{}={}", param_name, encoded_value);
+                    }
+                }
+                pair.to_string()
+            })
+            .collect();
+
+        if found {
+            Ok(format!("{}?{}", base_path, new_query.join("&")))
+        } else {
+            // Append the parameter
+            Ok(format!(
+                "{}?{}&{}={}",
+                base_path, query, param_name, encoded_value
+            ))
+        }
+    } else {
+        // No query string, add one
+        Ok(format!("{}?{}={}", path, param_name, encoded_value))
+    }
+}
+
+/// Inject credential into request based on mode.
+///
+/// For header/basic_auth modes, adds the credential header.
+/// For url_path/query_param modes, the credential is already in the path.
+fn inject_credential_for_mode(cred: &LoadedCredential, request: &mut Zeroizing<String>) {
+    match cred.inject_mode {
+        InjectMode::Header | InjectMode::BasicAuth => {
+            // Inject credential header
+            request.push_str(&format!(
+                "{}: {}\r\n",
+                cred.header_name,
+                cred.header_value.as_str()
+            ));
+        }
+        InjectMode::UrlPath | InjectMode::QueryParam => {
+            // Credential is already injected into the URL path/query
+            // No header injection needed
+        }
+    }
 }
 
 #[cfg(test)]
@@ -641,5 +972,134 @@ mod tests {
     fn test_parse_response_status_partial() {
         let data = b"HTTP/1.1 ";
         assert_eq!(parse_response_status(data), 502);
+    }
+
+    // ============================================================================
+    // URL Path Injection Mode Tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_phantom_token_in_path_valid() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/bot/session123/getMe";
+        let pattern = "/bot/{}/";
+        assert!(validate_phantom_token_in_path(path, pattern, &token).is_ok());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_path_invalid() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/bot/wrong_token/getMe";
+        let pattern = "/bot/{}/";
+        assert!(validate_phantom_token_in_path(path, pattern, &token).is_err());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_path_missing() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/api/getMe";
+        let pattern = "/bot/{}/";
+        assert!(validate_phantom_token_in_path(path, pattern, &token).is_err());
+    }
+
+    #[test]
+    fn test_transform_url_path_basic() {
+        let credential = Zeroizing::new("real_token".to_string());
+        let path = "/bot/phantom_token/getMe";
+        let pattern = "/bot/{}/";
+        let replacement = "/bot/{}/";
+        let result = transform_url_path(path, pattern, replacement, &credential).unwrap();
+        assert_eq!(result, "/bot/real_token/getMe");
+    }
+
+    #[test]
+    fn test_transform_url_path_different_replacement() {
+        let credential = Zeroizing::new("real_token".to_string());
+        let path = "/api/v1/phantom_token/chat";
+        let pattern = "/api/v1/{}/";
+        let replacement = "/v2/bot/{}/";
+        let result = transform_url_path(path, pattern, replacement, &credential).unwrap();
+        assert_eq!(result, "/v2/bot/real_token/chat");
+    }
+
+    #[test]
+    fn test_transform_url_path_no_trailing_slash() {
+        let credential = Zeroizing::new("real_token".to_string());
+        let path = "/bot/phantom_token";
+        let pattern = "/bot/{}";
+        let replacement = "/bot/{}";
+        let result = transform_url_path(path, pattern, replacement, &credential).unwrap();
+        assert_eq!(result, "/bot/real_token");
+    }
+
+    // ============================================================================
+    // Query Param Injection Mode Tests
+    // ============================================================================
+
+    #[test]
+    fn test_validate_phantom_token_in_query_valid() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/api/data?api_key=session123&other=value";
+        assert!(validate_phantom_token_in_query(path, "api_key", &token).is_ok());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_query_invalid() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/api/data?api_key=wrong_token";
+        assert!(validate_phantom_token_in_query(path, "api_key", &token).is_err());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_query_missing_param() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/api/data?other=value";
+        assert!(validate_phantom_token_in_query(path, "api_key", &token).is_err());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_query_no_query_string() {
+        let token = Zeroizing::new("session123".to_string());
+        let path = "/api/data";
+        assert!(validate_phantom_token_in_query(path, "api_key", &token).is_err());
+    }
+
+    #[test]
+    fn test_validate_phantom_token_in_query_url_encoded() {
+        let token = Zeroizing::new("token with spaces".to_string());
+        let path = "/api/data?api_key=token%20with%20spaces";
+        assert!(validate_phantom_token_in_query(path, "api_key", &token).is_ok());
+    }
+
+    #[test]
+    fn test_transform_query_param_add_to_no_query() {
+        let credential = Zeroizing::new("real_key".to_string());
+        let path = "/api/data";
+        let result = transform_query_param(path, "api_key", &credential).unwrap();
+        assert_eq!(result, "/api/data?api_key=real_key");
+    }
+
+    #[test]
+    fn test_transform_query_param_add_to_existing_query() {
+        let credential = Zeroizing::new("real_key".to_string());
+        let path = "/api/data?other=value";
+        let result = transform_query_param(path, "api_key", &credential).unwrap();
+        assert_eq!(result, "/api/data?other=value&api_key=real_key");
+    }
+
+    #[test]
+    fn test_transform_query_param_replace_existing() {
+        let credential = Zeroizing::new("real_key".to_string());
+        let path = "/api/data?api_key=phantom&other=value";
+        let result = transform_query_param(path, "api_key", &credential).unwrap();
+        assert_eq!(result, "/api/data?api_key=real_key&other=value");
+    }
+
+    #[test]
+    fn test_transform_query_param_url_encodes_special_chars() {
+        let credential = Zeroizing::new("key with spaces".to_string());
+        let path = "/api/data";
+        let result = transform_query_param(path, "api_key", &credential).unwrap();
+        assert_eq!(result, "/api/data?api_key=key%20with%20spaces");
     }
 }

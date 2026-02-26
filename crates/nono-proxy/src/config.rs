@@ -7,6 +7,21 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
+/// Credential injection mode determining how credentials are inserted into requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectMode {
+    /// Inject credential into an HTTP header (default)
+    #[default]
+    Header,
+    /// Replace a pattern in the URL path with the credential
+    UrlPath,
+    /// Add or replace a query parameter with the credential
+    QueryParam,
+    /// Use HTTP Basic Authentication (credential format: "username:password")
+    BasicAuth,
+}
+
 /// Configuration for the proxy server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -72,14 +87,40 @@ pub struct RouteConfig {
     /// If `None`, no credential is injected.
     pub credential_key: Option<String>,
 
+    /// Injection mode (default: "header")
+    #[serde(default)]
+    pub inject_mode: InjectMode,
+
+    // --- Header mode fields ---
     /// HTTP header name for the credential (default: "Authorization")
+    /// Only used when inject_mode is "header".
     #[serde(default = "default_inject_header")]
     pub inject_header: String,
 
     /// Format string for the credential value. `{}` is replaced with the secret.
     /// Default: "Bearer {}"
+    /// Only used when inject_mode is "header".
     #[serde(default = "default_credential_format")]
     pub credential_format: String,
+
+    // --- URL path mode fields ---
+    /// Pattern to match in incoming URL path. Use {} as placeholder for phantom token.
+    /// Example: "/bot{}/" matches "/bot<token>/getMe"
+    /// Only used when inject_mode is "url_path".
+    #[serde(default)]
+    pub path_pattern: Option<String>,
+
+    /// Pattern for outgoing URL path. Use {} as placeholder for real credential.
+    /// Defaults to same as path_pattern if not specified.
+    /// Only used when inject_mode is "url_path".
+    #[serde(default)]
+    pub path_replacement: Option<String>,
+
+    // --- Query param mode fields ---
+    /// Name of the query parameter to add/replace with the credential.
+    /// Only used when inject_mode is "query_param".
+    #[serde(default)]
+    pub query_param_name: Option<String>,
 }
 
 fn default_inject_header() -> String {

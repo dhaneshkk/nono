@@ -29,6 +29,7 @@ keyring = "3"
 base64 = "0.22"
 subtle = "2"
 url = "2"
+urlencoding = "2"
 
 # TLS for upstream connections (reverse proxy mode)
 hyper-rustls = { version = "0.27", features = ["http1", "ring", "webpki-tokio"] }

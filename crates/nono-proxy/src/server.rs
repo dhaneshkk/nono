@@ -368,8 +368,12 @@ mod tests {
                 prefix: "openai".to_string(),
                 upstream: "https://api.openai.com".to_string(),
                 credential_key: None,
+                inject_mode: crate::config::InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
             }],
             ..Default::default()
         };
