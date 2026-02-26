@@ -48,6 +48,166 @@ pub struct FilesystemConfig {
     pub write_file: Vec<String>,
 }
 
+/// Custom credential route definition for reverse proxy.
+///
+/// Allows users to define their own credential services in profiles,
+/// enabling `--proxy-credential` to work with any API without requiring
+/// changes to the built-in `network-policy.json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomCredentialDef {
+    /// Upstream URL to proxy requests to (e.g., "https://api.telegram.org")
+    pub upstream: String,
+    /// Keystore account name for the credential (e.g., "telegram_bot_token")
+    pub credential_key: String,
+    /// HTTP header to inject the credential into (default: "Authorization")
+    #[serde(default = "default_inject_header")]
+    pub inject_header: String,
+    /// Format string for the credential value (default: "Bearer {}")
+    /// Use {} as placeholder for the credential value.
+    #[serde(default = "default_credential_format")]
+    pub credential_format: String,
+}
+
+fn default_inject_header() -> String {
+    "Authorization".to_string()
+}
+
+fn default_credential_format() -> String {
+    "Bearer {}".to_string()
+}
+
+/// Check if a character is a valid HTTP token character per RFC 7230.
+fn is_http_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
+}
+
+/// Validate a custom credential definition for security issues.
+///
+/// Checks:
+/// - `inject_header` must be a valid HTTP token (RFC 7230)
+/// - `credential_format` must not contain CRLF sequences
+/// - `credential_key` must be alphanumeric + underscores only
+/// - `upstream` must be HTTPS (or HTTP for loopback only)
+fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<()> {
+    // Validate inject_header (RFC 7230 token)
+    if cred.inject_header.is_empty() {
+        return Err(NonoError::ProfileParse(format!(
+            "inject_header for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+    if !cred.inject_header.chars().all(is_http_token_char) {
+        return Err(NonoError::ProfileParse(format!(
+            "inject_header '{}' for custom credential '{}' contains invalid characters; \
+             header names must be valid HTTP tokens (alphanumeric and !#$%&'*+-.^_`|~)",
+            cred.inject_header, name
+        )));
+    }
+
+    // Validate credential_format (no CRLF injection)
+    if cred.credential_format.contains('\r') || cred.credential_format.contains('\n') {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_format for custom credential '{}' contains invalid CRLF characters; \
+             this could enable header injection attacks",
+            name
+        )));
+    }
+
+    // Validate credential_key (alphanumeric + underscore)
+    if cred.credential_key.is_empty() {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_key for custom credential '{}' cannot be empty",
+            name
+        )));
+    }
+    if !cred
+        .credential_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(NonoError::ProfileParse(format!(
+            "credential_key '{}' for custom credential '{}' must contain only \
+             alphanumeric characters and underscores",
+            cred.credential_key, name
+        )));
+    }
+
+    // Validate upstream URL (HTTPS required, HTTP only for loopback)
+    validate_upstream_url(&cred.upstream, name)?;
+
+    Ok(())
+}
+
+/// Validate an upstream URL for security.
+///
+/// HTTP is only allowed for loopback addresses:
+/// - `localhost` (hostname)
+/// - `127.0.0.0/8` (IPv4 loopback range)
+/// - `::1` (IPv6 loopback)
+/// - `0.0.0.0` (unspecified IPv4, binds to all interfaces)
+/// - `::` (unspecified IPv6)
+fn validate_upstream_url(url: &str, service_name: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).map_err(|e| {
+        NonoError::ProfileParse(format!(
+            "Invalid upstream URL for custom credential '{}': {}",
+            service_name, e
+        ))
+    })?;
+
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            // For IPv6 addresses, url::Url returns the address in host()
+            // but host_str() may include brackets. We need to handle both cases.
+            let is_loopback = match parsed.host() {
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+                Some(url::Host::Domain(domain)) => domain == "localhost",
+                None => false,
+            };
+
+            if is_loopback {
+                Ok(())
+            } else {
+                Err(NonoError::ProfileParse(format!(
+                    "Upstream URL for custom credential '{}' must use HTTPS \
+                     (HTTP only allowed for loopback addresses): {}",
+                    service_name, url
+                )))
+            }
+        }
+        scheme => Err(NonoError::ProfileParse(format!(
+            "Upstream URL for custom credential '{}' must use HTTPS, got scheme '{}': {}",
+            service_name, scheme, url
+        ))),
+    }
+}
+
+/// Validate all custom credentials in a profile.
+fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
+    for (name, cred) in &profile.network.custom_credentials {
+        validate_custom_credential(name, cred)?;
+    }
+    Ok(())
+}
+
 /// Network configuration in a profile
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NetworkConfig {
@@ -64,6 +224,11 @@ pub struct NetworkConfig {
     /// Credential services to enable via reverse proxy
     #[serde(default)]
     pub proxy_credentials: Vec<String>,
+    /// Custom credential definitions for services not in network-policy.json.
+    /// Keys are service names (used with --proxy-credential), values define
+    /// how to route and inject credentials for that service.
+    #[serde(default)]
+    pub custom_credentials: HashMap<String, CustomCredentialDef>,
 }
 
 /// Secrets configuration in a profile
@@ -278,7 +443,13 @@ fn load_from_file(path: &Path) -> Result<Profile> {
         source: e,
     })?;
 
-    serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))
+    let profile: Profile =
+        serde_json::from_str(&content).map_err(|e| NonoError::ProfileParse(e.to_string()))?;
+
+    // Validate custom credentials for security issues
+    validate_profile_custom_credentials(&profile)?;
+
+    Ok(profile)
 }
 
 /// Get the path to a user profile
@@ -453,6 +624,9 @@ mod tests {
 
     #[test]
     fn test_expand_vars() {
+        // Save original HOME to restore after test (avoid polluting other parallel tests)
+        let original_home = env::var("HOME").ok();
+
         let workdir = PathBuf::from("/projects/myapp");
         env::set_var("HOME", "/home/user");
 
@@ -461,6 +635,11 @@ mod tests {
 
         let expanded = expand_vars("$HOME/.config", &workdir).expect("valid env");
         assert_eq!(expanded, PathBuf::from("/home/user/.config"));
+
+        // Restore original HOME
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
     }
 
     #[test]
@@ -725,5 +904,247 @@ mod tests {
 
         let profile: Profile = serde_json::from_str(json_str).expect("Failed to parse profile");
         assert_eq!(profile.workdir.access, WorkdirAccess::None);
+    }
+
+    // ============================================================================
+    // is_http_token_char tests (RFC 7230)
+    // ============================================================================
+
+    #[test]
+    fn test_http_token_char_alphanumeric() {
+        assert!(is_http_token_char('a'));
+        assert!(is_http_token_char('Z'));
+        assert!(is_http_token_char('0'));
+        assert!(is_http_token_char('9'));
+    }
+
+    #[test]
+    fn test_http_token_char_special_chars() {
+        // RFC 7230 tchar: !#$%&'*+-.^_`|~
+        for c in "!#$%&'*+-.^_`|~".chars() {
+            assert!(is_http_token_char(c), "Expected '{}' to be valid tchar", c);
+        }
+    }
+
+    #[test]
+    fn test_http_token_char_rejects_invalid() {
+        // Control chars, space, colon, parentheses should be rejected
+        assert!(!is_http_token_char(' '));
+        assert!(!is_http_token_char(':'));
+        assert!(!is_http_token_char('('));
+        assert!(!is_http_token_char(')'));
+        assert!(!is_http_token_char('\r'));
+        assert!(!is_http_token_char('\n'));
+    }
+
+    // ============================================================================
+    // Custom credential validation integration tests
+    //
+    // These test the full validation chain including:
+    // - inject_header (RFC 7230 token validation)
+    // - credential_format (CRLF injection prevention)
+    // - credential_key (alphanumeric + underscore)
+    // - upstream URL (HTTPS required, HTTP only for loopback)
+    // ============================================================================
+
+    #[test]
+    fn test_validate_custom_credential_valid() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("test", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_loopback_allowed() {
+        let cred = CustomCredentialDef {
+            upstream: "http://127.0.0.1:8080/api".to_string(),
+            credential_key: "local_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("local", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_remote_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "http://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("HTTP to remote should be rejected");
+        assert!(err.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_invalid_header_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "X-Header\r\nEvil: injected".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("CRLF in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_invalid_format_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}\r\nEvil: header".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("CRLF in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_invalid_key_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api-key".to_string(), // hyphens not allowed
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("hyphen in key should be rejected");
+        assert!(err.to_string().contains("alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_empty_header_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("empty header should be rejected");
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_header_with_space_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "X Header".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("space in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_header_with_colon_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "X-Header:".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("colon in header should be rejected");
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_valid_special_header_chars() {
+        // RFC 7230 tchar special chars should be allowed in header names
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "X-Header!".to_string(), // ! is valid tchar
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("test", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_format_with_cr_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}\rEvil: header".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("CR in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_format_with_lf_rejected() {
+        let cred = CustomCredentialDef {
+            upstream: "https://api.example.com".to_string(),
+            credential_key: "api_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}\nEvil: header".to_string(),
+        };
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("LF in format should be rejected");
+        assert!(err.to_string().contains("CRLF"));
+    }
+
+    #[test]
+    fn test_validate_custom_credential_various_valid_formats() {
+        for format in ["Bearer {}", "Token {}", "{}", "Basic {}", "ApiKey={}"] {
+            let cred = CustomCredentialDef {
+                upstream: "https://api.example.com".to_string(),
+                credential_key: "api_key".to_string(),
+                inject_header: "Authorization".to_string(),
+                credential_format: format.to_string(),
+            };
+            assert!(
+                validate_custom_credential("test", &cred).is_ok(),
+                "Expected format '{}' to be valid",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_localhost_allowed() {
+        let cred = CustomCredentialDef {
+            upstream: "http://localhost:3000/api".to_string(),
+            credential_key: "local_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("local", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_ipv6_loopback_allowed() {
+        let cred = CustomCredentialDef {
+            upstream: "http://[::1]:8080/api".to_string(),
+            credential_key: "local_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("local", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_credential_http_0_0_0_0_allowed() {
+        let cred = CustomCredentialDef {
+            upstream: "http://0.0.0.0:3000/api".to_string(),
+            credential_key: "local_key".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+        };
+        assert!(validate_custom_credential("local", &cred).is_ok());
     }
 }
