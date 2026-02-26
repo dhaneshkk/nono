@@ -196,6 +196,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             config: None,
             verbose: 0,
             dry_run: false,
+            allow_bind: vec![],
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_profile(&prof, &workdir, &sandbox_args)?;
@@ -226,6 +227,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             config: None,
             verbose: 0,
             dry_run: false,
+            allow_bind: vec![],
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_args(&sandbox_args)?;
@@ -429,6 +431,7 @@ fn run_sandbox(
             proxy_credentials,
             custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
+            allow_bind_ports: args.allow_bind,
         },
     )
 }
@@ -494,6 +497,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             proxy_credentials: Vec::new(),
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
+            allow_bind_ports: Vec::new(),
         },
     )
 }
@@ -530,6 +534,8 @@ struct ExecutionFlags {
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
     /// External proxy address (from --external-proxy)
     external_proxy: Option<String>,
+    /// Ports the sandboxed process is allowed to bind (from --allow-bind)
+    allow_bind_ports: Vec<u16>,
 }
 
 /// Select execution strategy from user/runtime flags.
@@ -703,10 +709,23 @@ fn execute_sandboxed(
             .block_on(async { nono_proxy::server::start(proxy_config.clone()).await })
             .map_err(|e| NonoError::SandboxInit(format!("Failed to start proxy: {}", e)))?;
 
-        // Update the sandbox capability port to the actual bound port
+        // Update the sandbox capability port to the actual bound port.
+        // Include allow_bind_ports so the sandboxed process can listen on those ports
+        // while still routing outbound HTTP through the credential injection proxy.
         let port = handle.port;
-        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly { port });
-        info!("Network proxy started on localhost:{}", port);
+        // Log before moving allow_bind_ports
+        if flags.allow_bind_ports.is_empty() {
+            info!("Network proxy started on localhost:{}", port);
+        } else {
+            info!(
+                "Network proxy started on localhost:{}, bind ports: {:?}",
+                port, flags.allow_bind_ports
+            );
+        }
+        caps.set_network_mode_mut(nono::NetworkMode::ProxyOnly {
+            port,
+            bind_ports: flags.allow_bind_ports,
+        });
 
         // Collect proxy env vars for the child process
         for (k, v) in handle.env_vars() {

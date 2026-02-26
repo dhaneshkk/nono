@@ -246,6 +246,15 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "SERVICE")]
     pub proxy_credential: Vec<String>,
 
+    /// Allow the sandboxed process to bind (listen) on a specific TCP port.
+    /// Use this for server apps that need to accept connections while still
+    /// routing outbound HTTP through the credential proxy.
+    /// Can be specified multiple times for multiple ports.
+    /// Note: On macOS, Seatbelt cannot filter by port, so this enables blanket
+    /// bind/inbound access. On Linux, per-port filtering is enforced.
+    #[arg(long, value_name = "PORT")]
+    pub allow_bind: Vec<u16>,
+
     /// Chain through an external (enterprise) proxy.
     /// Format: host:port (e.g., squid.corp.internal:3128)
     #[arg(long, value_name = "HOST:PORT")]

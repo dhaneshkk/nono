@@ -141,7 +141,50 @@ OpenClaw requires network access to communicate with:
 - AI provider APIs (OpenAI, Anthropic, etc.)
 - Optional web search APIs (Brave Search)
 
-The profile allows full network access. Future nono versions will support per-host filtering to restrict connections to only required endpoints.
+The profile allows full network access. For stricter isolation, use nono's proxy mode with credential injection (see below).
+
+### Credential Injection (Recommended)
+
+Instead of passing API keys directly to OpenClaw, use nono's credential injection to keep secrets out of the agent's memory entirely:
+
+```bash
+nono run --profile openclaw-demo --allow-cwd \
+  --proxy-credential openai --proxy-credential anthropic --proxy-credential gemini \
+  --allow-bind 18789 -- openclaw gateway
+```
+
+**How it works:**
+1. Real API keys are stored in your system keyring (never in files or environment)
+2. nono sets `OPENAI_BASE_URL=http://127.0.0.1:PORT/openai` pointing to its local proxy
+3. nono sets `OPENAI_API_KEY` to a session-specific phantom token
+4. OpenClaw sends requests to the proxy with the phantom token
+5. The proxy validates the token, swaps in the real API key, forwards to the upstream API
+6. The real API key never enters the sandboxed process
+
+This protects against prompt injection attacks that attempt to exfiltrate credentials - even if an attacker tricks the agent into revealing its "API key", they only get the worthless phantom token.
+
+See [Credential Injection](/cli/features/credential-injection) for setup instructions.
+
+### Server Apps and Port Binding
+
+OpenClaw Gateway listens on a WebSocket port (default 18789) to accept connections from UI clients and nodes. In proxy mode, you must explicitly allow this with `--allow-bind`:
+
+```bash
+nono run --profile openclaw --allow-bind 18789 \
+  --proxy-credential openai -- openclaw gateway
+```
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter by port number. When `--allow-bind` is specified on macOS, the sandbox permits binding to any port and accepting inbound connections from any source.
+
+This is a broader permission than intended, but the security impact is limited:
+- Outbound connections are still restricted to the proxy (credential exfiltration is blocked)
+- Filesystem access is still limited to granted paths
+- An attacker would need to know the machine's IP and which port the agent opened
+- Even if they connect, they can only send data in - the agent cannot exfiltrate responses
+
+On Linux with Landlock ABI v4+, per-port filtering is enforced and only the specified ports can be bound.
+</Warning>
 
 ### Running as a Daemon
 

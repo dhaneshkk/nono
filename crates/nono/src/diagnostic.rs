@@ -365,8 +365,17 @@ impl<'a> DiagnosticFormatter<'a> {
             NetworkMode::Blocked => {
                 lines.push("[nono]   Network: blocked".to_string());
             }
-            NetworkMode::ProxyOnly { port } => {
-                lines.push(format!("[nono]   Network: proxy (localhost:{})", port));
+            NetworkMode::ProxyOnly { port, bind_ports } => {
+                if bind_ports.is_empty() {
+                    lines.push(format!("[nono]   Network: proxy (localhost:{})", port));
+                } else {
+                    let ports_str: Vec<String> = bind_ports.iter().map(|p| p.to_string()).collect();
+                    lines.push(format!(
+                        "[nono]   Network: proxy (localhost:{}), bind: {}",
+                        port,
+                        ports_str.join(", ")
+                    ));
+                }
             }
             NetworkMode::AllowAll => {
                 lines.push("[nono]   Network: allowed".to_string());
@@ -555,7 +564,10 @@ mod tests {
     fn test_standard_footer_shows_network_proxy() {
         use crate::NetworkMode;
         let mut caps = CapabilitySet::new().block_network();
-        caps.set_network_mode_mut(NetworkMode::ProxyOnly { port: 12345 });
+        caps.set_network_mode_mut(NetworkMode::ProxyOnly {
+            port: 12345,
+            bind_ports: vec![],
+        });
         caps.add_fs(FsCapability {
             original: PathBuf::from("/test/project"),
             resolved: PathBuf::from("/test/project"),

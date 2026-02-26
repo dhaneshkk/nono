@@ -127,7 +127,10 @@ pub fn validate_network_mode(raw: u32) -> Option<nono::NetworkMode> {
     match raw {
         NONO_NETWORK_MODE_BLOCKED => Some(nono::NetworkMode::Blocked),
         NONO_NETWORK_MODE_ALLOW_ALL => Some(nono::NetworkMode::AllowAll),
-        NONO_NETWORK_MODE_PROXY_ONLY => Some(nono::NetworkMode::ProxyOnly { port: 0 }),
+        NONO_NETWORK_MODE_PROXY_ONLY => Some(nono::NetworkMode::ProxyOnly {
+            port: 0,
+            bind_ports: vec![],
+        }),
         _ => None,
     }
 }

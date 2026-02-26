@@ -120,8 +120,18 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
         NetworkMode::Blocked => {
             eprintln!("    outbound: {}", "blocked".red());
         }
-        NetworkMode::ProxyOnly { port } => {
-            eprintln!("    outbound: {} (localhost:{})", "proxy".yellow(), port);
+        NetworkMode::ProxyOnly { port, bind_ports } => {
+            if bind_ports.is_empty() {
+                eprintln!("    outbound: {} (localhost:{})", "proxy".yellow(), port);
+            } else {
+                let ports_str: Vec<String> = bind_ports.iter().map(|p| p.to_string()).collect();
+                eprintln!(
+                    "    outbound: {} (localhost:{}), bind: {}",
+                    "proxy".yellow(),
+                    port,
+                    ports_str.join(", ")
+                );
+            }
         }
         NetworkMode::AllowAll => {
             eprintln!("    outbound: {}", "allowed".green());

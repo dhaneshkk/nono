@@ -447,7 +447,7 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
         NetworkMode::Blocked => {
             profile.push_str("(deny network*)\n");
         }
-        NetworkMode::ProxyOnly { port } => {
+        NetworkMode::ProxyOnly { port, bind_ports } => {
             // Block all network, then allow only localhost TCP to the proxy port.
             // system-socket is required for TCP connect to function.
             profile.push_str("(deny network*)\n");
@@ -463,6 +463,13 @@ fn generate_profile(caps: &CapabilitySet) -> Result<String> {
             profile.push_str(
                 "(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))\n",
             );
+            // If bind ports are specified, allow network-bind and network-inbound.
+            // Seatbelt cannot filter bind/inbound by port, so this is a blanket allow.
+            // The user accepts this tradeoff for apps that need to listen (e.g., OpenClaw).
+            if !bind_ports.is_empty() {
+                profile.push_str("(allow network-bind)\n");
+                profile.push_str("(allow network-inbound)\n");
+            }
         }
         NetworkMode::AllowAll => {
             profile.push_str("(allow network-outbound)\n");
@@ -885,6 +892,27 @@ mod tests {
         assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:54321\"))"));
         // Should allow system-socket for TCP connect
         assert!(profile.contains("(allow system-socket)"));
+        // Should NOT have general outbound allow
+        assert!(!profile.contains("(allow network-outbound)\n"));
+        // Should NOT have bind/inbound without bind_ports
+        assert!(!profile.contains("(allow network-bind)"));
+        assert!(!profile.contains("(allow network-inbound)"));
+    }
+
+    #[test]
+    fn test_generate_profile_proxy_only_with_bind_ports() {
+        let caps = CapabilitySet::new().proxy_only_with_bind(54321, vec![18789, 3000]);
+        let profile = generate_profile(&caps).unwrap();
+
+        // Should deny all network first (deny before allow)
+        assert!(profile.contains("(deny network*)"));
+        // Should allow only localhost TCP to proxy port
+        assert!(profile.contains("(allow network-outbound (remote tcp \"localhost:54321\"))"));
+        // Should allow system-socket for TCP connect
+        assert!(profile.contains("(allow system-socket)"));
+        // Should have bind and inbound allowed (blanket, since Seatbelt can't filter by port)
+        assert!(profile.contains("(allow network-bind)"));
+        assert!(profile.contains("(allow network-inbound)"));
         // Should NOT have general outbound allow
         assert!(!profile.contains("(allow network-outbound)\n"));
     }

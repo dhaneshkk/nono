@@ -126,7 +126,7 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
         .map_err(|e| NonoError::SandboxInit(format!("Failed to create ruleset: {}", e)))?;
 
     // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
-    if let NetworkMode::ProxyOnly { port } = caps.network_mode() {
+    if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
         debug!("Adding ProxyOnly TCP connect rule for port {}", port);
         ruleset = ruleset
             .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
@@ -136,6 +136,18 @@ pub fn apply(caps: &CapabilitySet) -> Result<()> {
                     port, e
                 ))
             })?;
+        // Add per-port TCP bind rules for bind_ports in ProxyOnly mode
+        for bp in bind_ports {
+            debug!("Adding ProxyOnly TCP bind rule for port {}", bp);
+            ruleset = ruleset
+                .add_rule(NetPort::new(*bp, AccessNet::BindTcp))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add TCP bind rule for port {}: {}",
+                        bp, e
+                    ))
+                })?;
+        }
     }
     for port in caps.tcp_connect_ports() {
         debug!("Adding TCP connect rule for port {}", port);

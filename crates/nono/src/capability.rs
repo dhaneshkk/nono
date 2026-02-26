@@ -346,12 +346,23 @@ pub enum NetworkMode {
     /// All network access allowed (no filtering)
     #[default]
     AllowAll,
-    /// Only localhost TCP to the specified port is allowed.
+    /// Only localhost TCP to the specified port is allowed for outbound.
+    /// Optionally allows binding and accepting inbound on specific ports.
+    ///
     /// On macOS: `(allow network-outbound (remote tcp "localhost:PORT"))`.
-    /// On Linux: Landlock `NetPort` rule for the specified port only.
+    /// If bind_ports is non-empty, also adds `(allow network-bind)` and
+    /// `(allow network-inbound)` (Seatbelt cannot filter by port).
+    ///
+    /// On Linux: Landlock `NetPort` rule for the proxy port (ConnectTcp) plus
+    /// per-port BindTcp rules for each bind_port.
     ProxyOnly {
         /// The localhost port the proxy listens on
         port: u16,
+        /// Ports the sandboxed process is allowed to bind and accept connections on.
+        /// This enables servers like OpenClaw gateway to listen while still routing
+        /// outbound HTTP through the credential proxy.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bind_ports: Vec<u16>,
     },
 }
 
@@ -360,7 +371,19 @@ impl std::fmt::Display for NetworkMode {
         match self {
             NetworkMode::Blocked => write!(f, "blocked"),
             NetworkMode::AllowAll => write!(f, "allowed"),
-            NetworkMode::ProxyOnly { port } => write!(f, "proxy-only (localhost:{})", port),
+            NetworkMode::ProxyOnly { port, bind_ports } => {
+                if bind_ports.is_empty() {
+                    write!(f, "proxy-only (localhost:{})", port)
+                } else {
+                    let ports_str: Vec<String> = bind_ports.iter().map(|p| p.to_string()).collect();
+                    write!(
+                        f,
+                        "proxy-only (localhost:{}, bind: {})",
+                        port,
+                        ports_str.join(", ")
+                    )
+                }
+            }
         }
     }
 }
@@ -454,7 +477,30 @@ impl CapabilitySet {
     /// On Linux: Landlock `NetPort` rule for the specified port.
     #[must_use]
     pub fn proxy_only(mut self, port: u16) -> Self {
-        self.network_mode = NetworkMode::ProxyOnly { port };
+        self.network_mode = NetworkMode::ProxyOnly {
+            port,
+            bind_ports: Vec::new(),
+        };
+        self
+    }
+
+    /// Restrict network to localhost proxy port only, with additional bind ports (builder pattern)
+    ///
+    /// Like `proxy_only`, but also allows the sandboxed process to bind and accept
+    /// inbound connections on the specified ports. This is useful for servers that
+    /// need to listen (e.g., OpenClaw gateway on port 18789) while still routing
+    /// outbound HTTP through the credential injection proxy.
+    ///
+    /// On macOS: Seatbelt cannot filter by port, so this adds blanket
+    /// `(allow network-bind)` and `(allow network-inbound)`.
+    ///
+    /// On Linux: Landlock adds per-port BindTcp rules.
+    #[must_use]
+    pub fn proxy_only_with_bind(mut self, proxy_port: u16, bind_ports: Vec<u16>) -> Self {
+        self.network_mode = NetworkMode::ProxyOnly {
+            port: proxy_port,
+            bind_ports,
+        };
         self
     }
 
@@ -1206,15 +1252,43 @@ mod tests {
     #[test]
     fn test_proxy_only_mode() {
         let caps = CapabilitySet::new().proxy_only(8080);
-        assert_eq!(*caps.network_mode(), NetworkMode::ProxyOnly { port: 8080 });
+        assert_eq!(
+            *caps.network_mode(),
+            NetworkMode::ProxyOnly {
+                port: 8080,
+                bind_ports: vec![]
+            }
+        );
         // ProxyOnly counts as blocked for general network access
         assert!(caps.is_network_blocked());
     }
 
     #[test]
+    fn test_proxy_only_with_bind_ports() {
+        let caps = CapabilitySet::new().proxy_only_with_bind(8080, vec![18789, 3000]);
+        assert_eq!(
+            *caps.network_mode(),
+            NetworkMode::ProxyOnly {
+                port: 8080,
+                bind_ports: vec![18789, 3000]
+            }
+        );
+        assert!(caps.is_network_blocked());
+    }
+
+    #[test]
     fn test_set_network_mode_builder() {
-        let caps = CapabilitySet::new().set_network_mode(NetworkMode::ProxyOnly { port: 54321 });
-        assert_eq!(*caps.network_mode(), NetworkMode::ProxyOnly { port: 54321 });
+        let caps = CapabilitySet::new().set_network_mode(NetworkMode::ProxyOnly {
+            port: 54321,
+            bind_ports: vec![],
+        });
+        assert_eq!(
+            *caps.network_mode(),
+            NetworkMode::ProxyOnly {
+                port: 54321,
+                bind_ports: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1265,14 +1339,54 @@ mod tests {
         assert_eq!(format!("{}", NetworkMode::Blocked), "blocked");
         assert_eq!(format!("{}", NetworkMode::AllowAll), "allowed");
         assert_eq!(
-            format!("{}", NetworkMode::ProxyOnly { port: 8080 }),
+            format!(
+                "{}",
+                NetworkMode::ProxyOnly {
+                    port: 8080,
+                    bind_ports: vec![]
+                }
+            ),
             "proxy-only (localhost:8080)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                NetworkMode::ProxyOnly {
+                    port: 8080,
+                    bind_ports: vec![18789]
+                }
+            ),
+            "proxy-only (localhost:8080, bind: 18789)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                NetworkMode::ProxyOnly {
+                    port: 8080,
+                    bind_ports: vec![18789, 3000]
+                }
+            ),
+            "proxy-only (localhost:8080, bind: 18789, 3000)"
         );
     }
 
     #[test]
     fn test_network_mode_serialization() {
-        let mode = NetworkMode::ProxyOnly { port: 54321 };
+        let mode = NetworkMode::ProxyOnly {
+            port: 54321,
+            bind_ports: vec![],
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: NetworkMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, deserialized);
+    }
+
+    #[test]
+    fn test_network_mode_serialization_with_bind_ports() {
+        let mode = NetworkMode::ProxyOnly {
+            port: 54321,
+            bind_ports: vec![18789, 3000],
+        };
         let json = serde_json::to_string(&mode).unwrap();
         let deserialized: NetworkMode = serde_json::from_str(&json).unwrap();
         assert_eq!(mode, deserialized);

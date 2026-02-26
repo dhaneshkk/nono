@@ -230,7 +230,10 @@ pub unsafe extern "C" fn nono_capability_set_set_proxy_port(
     }
     let caps = unsafe { &mut *caps };
     caps.inner
-        .set_network_mode_mut(nono::NetworkMode::ProxyOnly { port });
+        .set_network_mode_mut(nono::NetworkMode::ProxyOnly {
+            port,
+            bind_ports: vec![],
+        });
     NonoErrorCode::Ok
 }
 
@@ -248,7 +251,7 @@ pub unsafe extern "C" fn nono_capability_set_proxy_port(caps: *const NonoCapabil
     }
     let caps = unsafe { &*caps };
     match caps.inner.network_mode() {
-        nono::NetworkMode::ProxyOnly { port } => *port,
+        nono::NetworkMode::ProxyOnly { port, .. } => *port,
         _ => 0,
     }
 }

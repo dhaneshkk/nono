@@ -273,6 +273,35 @@ Chain outbound connections through an external (enterprise) proxy. The default d
 nono run --allow-cwd --network-profile enterprise --external-proxy squid.corp:3128 -- my-agent
 ```
 
+#### `--allow-bind`
+
+Allow the sandboxed process to bind and listen on a TCP port. Required when running server applications (like AI gateways) in proxy mode.
+
+```bash
+# Allow OpenClaw gateway to listen on its default port
+nono run --profile openclaw --allow-bind 18789 \
+  --proxy-credential openai -- openclaw gateway
+
+# Allow a development server
+nono run --allow-cwd --network-profile developer --allow-bind 3000 -- npm run dev
+```
+
+<Warning>
+**macOS limitation:** Seatbelt cannot filter by port number. When `--allow-bind` is specified on macOS, the sandbox permits binding to **any** port and accepting inbound connections from any source.
+
+This is a broader permission than intended, but the security impact is limited:
+- Outbound connections are still restricted to allowed hosts via the proxy
+- Filesystem access is still limited to granted paths
+- An attacker would need to know the machine's IP and which port the agent opened
+- Even if they connect, they can only send data in — the agent cannot exfiltrate responses to arbitrary hosts
+
+On Linux with Landlock ABI v4+, per-port filtering is enforced and only the specified ports can be bound.
+</Warning>
+
+<Note>
+`--allow-bind` only has effect in proxy mode (when `--network-profile` or `--proxy-allow` is active). Without proxy mode, network operations use the default OS-level allow/deny and bind is not restricted.
+</Note>
+
 ## `nono shell` Options
 
 `nono shell` supports the same permission, profile, secrets, and dry-run flags as `nono run`, plus:
