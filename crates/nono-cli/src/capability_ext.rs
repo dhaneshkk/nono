@@ -415,6 +415,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -446,6 +447,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -476,6 +478,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (caps, _) = CapabilitySet::from_args(&args).expect("Failed to build caps");
@@ -510,6 +513,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let err = CapabilitySet::from_args(&args).expect_err("must reject protected state path");
@@ -548,6 +552,7 @@ mod tests {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (mut caps, needs_unlink_overrides) =

@@ -197,6 +197,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_profile(&prof, &workdir, &sandbox_args)?;
@@ -228,6 +229,7 @@ fn run_why(args: WhyArgs) -> Result<()> {
             verbose: 0,
             dry_run: false,
             allow_bind: vec![],
+            proxy_port: None,
         };
 
         let (mut caps, needs_unlink) = CapabilitySet::from_args(&sandbox_args)?;
@@ -432,6 +434,7 @@ fn run_sandbox(
             custom_credentials: prepared.custom_credentials,
             external_proxy: args.external_proxy.clone(),
             allow_bind_ports: args.allow_bind,
+            proxy_port: args.proxy_port,
         },
     )
 }
@@ -498,6 +501,7 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             allow_bind_ports: Vec::new(),
+            proxy_port: None,
         },
     )
 }
@@ -536,6 +540,8 @@ struct ExecutionFlags {
     external_proxy: Option<String>,
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
+    /// Fixed port for the credential proxy (from --proxy-port)
+    proxy_port: Option<u16>,
 }
 
 /// Select execution strategy from user/runtime flags.
@@ -617,6 +623,11 @@ fn build_proxy_config_from_flags(
             address: addr.clone(),
             auth: None,
         });
+    }
+
+    // Set fixed proxy port if specified
+    if let Some(port) = flags.proxy_port {
+        proxy_config.bind_port = port;
     }
 
     Ok(proxy_config)

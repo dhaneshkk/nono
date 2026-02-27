@@ -70,6 +70,9 @@ impl ProxyHandle {
         vars.push(("https_proxy".to_string(), proxy_url));
         vars.push(("no_proxy".to_string(), "localhost,127.0.0.1".to_string()));
 
+        // Node.js v22.21.0+ / v24.0.0+ requires this flag for native fetch() to use HTTP_PROXY
+        vars.push(("NODE_USE_ENV_PROXY".to_string(), "1".to_string()));
+
         vars
     }
 

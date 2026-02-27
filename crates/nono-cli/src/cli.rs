@@ -260,6 +260,12 @@ pub struct SandboxArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub external_proxy: Option<String>,
 
+    /// Fixed port for the credential injection proxy (default: OS-assigned).
+    /// Use this when the sandboxed application requires a known proxy port
+    /// (e.g., for base URL configuration that can't read environment variables).
+    #[arg(long, value_name = "PORT")]
+    pub proxy_port: Option<u16>,
+
     // === Command blocking ===
     /// Allow a normally-blocked dangerous command (use with caution).
     /// By default, destructive commands like rm, dd, chmod are blocked.
