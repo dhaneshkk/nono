@@ -38,27 +38,28 @@ The built-in profile provides:
 
 ## Custom Profile
 
-If you need different permissions, create a custom profile at `~/.config/nono/profiles/claude-code.toml`:
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/claude-code.json`:
 
-```toml
-[meta]
-name = "claude-code"
-version = "1.0.0"
-description = "Claude Code with additional project access"
-
-[filesystem]
-allow = ["$WORKDIR", "$HOME/.claude"]
-read = ["$HOME/shared-libs"]
-
-[filesystem.files]
-allow = ["$HOME/.claude.json"]
-read = ["$HOME/.gitconfig"]
-
-[network]
-block = false
-
-[secrets]
-anthropic_api_key = "ANTHROPIC_API_KEY"
+```json
+{
+  "meta": {
+    "name": "claude-code",
+    "version": "1.0.0",
+    "description": "Claude Code with additional project access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR", "$HOME/.claude"],
+    "read": ["$HOME/shared-libs"],
+    "allow_file": ["$HOME/.claude.json"],
+    "read_file": ["$HOME/.gitconfig"]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "anthropic_api_key": "ANTHROPIC_API_KEY"
+  }
+}
 ```
 
 **Usage:**
@@ -91,7 +92,7 @@ Then run with secrets:
 nono run --profile claude-code --env-credential anthropic_api_key -- claude
 ```
 
-See [Secrets Management](/cli/features/secrets) for full documentation.
+See [Credential Injection](/cli/features/credential-injection) for full documentation.
 
 ### Restrict to Specific Projects
 

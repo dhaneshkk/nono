@@ -34,29 +34,31 @@ nono has already proven capable of stopping some nasty reported CVEs from exploi
 
 ## Custom Profile
 
-If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.toml`:
+If you need different permissions, create a custom profile at `~/.config/nono/profiles/openclaw-strict.json`:
 
 ```bash
 mkdir -p ~/.config/nono/profiles
 ```
 
-```toml
-[meta]
-name = "openclaw-strict"
-version = "1.0.0"
-description = "OpenClaw with read-only config access"
-
-[filesystem]
-allow = ["$WORKDIR"]
-read = ["$HOME/.openclaw", "$HOME/.config/openclaw"]
-
-[network]
-block = false  # Required for messaging APIs
-
-[secrets]
-# Load credentials from system keystore instead of files
-telegram_bot_token = "TELEGRAM_BOT_TOKEN"
-openai_api_key = "OPENAI_API_KEY"
+```json
+{
+  "meta": {
+    "name": "openclaw-strict",
+    "version": "1.0.0",
+    "description": "OpenClaw with read-only config access"
+  },
+  "filesystem": {
+    "allow": ["$WORKDIR"],
+    "read": ["$HOME/.openclaw", "$HOME/.config/openclaw"]
+  },
+  "network": {
+    "block": false
+  },
+  "env_credentials": {
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "openai_api_key": "OPENAI_API_KEY"
+  }
+}
 ```
 
 **Usage:**
@@ -65,7 +67,7 @@ nono run --profile openclaw-strict --env-credential -- openclaw gateway
 ```
 
 <Note>
-Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.toml`, it will be used instead of the built-in.
+Custom profiles override built-in profiles of the same name. If you create `~/.config/nono/profiles/openclaw.json`, it will be used instead of the built-in.
 </Note>
 
 See [Security Profiles](/cli/features/profiles-groups) for the full profile format reference.
@@ -120,7 +122,7 @@ The secrets are loaded from the keystore and injected as `$TELEGRAM_BOT_TOKEN` a
 Secrets are loaded **before** the sandbox is applied, then zeroized from nono's memory after `exec()`. The sandboxed process cannot access the keystore directly - it only receives the specific secrets you authorized.
 </Note>
 
-See [Secrets Management](/cli/features/secrets) for complete documentation on storing and managing secrets.
+See [Credential Injection](/cli/features/credential-injection) for complete documentation on storing and managing secrets.
 
 ### Limit Agent Filesystem Access
 
