@@ -25,6 +25,7 @@ mod terminal_approval;
 mod trust_cmd;
 mod trust_intercept;
 mod trust_scan;
+mod update_check;
 
 use capability_ext::CapabilitySetExt;
 use clap::Parser;
@@ -55,10 +56,18 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Start background update check (non-blocking, 3s timeout)
+    let mut update_handle = if !cli.silent {
+        update_check::start_background_check()
+    } else {
+        None
+    };
+
     match cli.command {
         Commands::Learn(args) => run_learn(*args, cli.silent),
         Commands::Run(args) => {
             output::print_banner(cli.silent);
+            show_update_notification(&mut update_handle, cli.silent);
             run_sandbox(
                 args.sandbox,
                 args.command,
@@ -73,13 +82,38 @@ fn run() -> Result<()> {
         }
         Commands::Shell(args) => {
             output::print_banner(cli.silent);
+            show_update_notification(&mut update_handle, cli.silent);
             run_shell(*args, cli.silent)
         }
-        Commands::Why(args) => run_why(*args),
-        Commands::Setup(args) => run_setup(args),
-        Commands::Rollback(args) => rollback_commands::run_rollback(args),
-        Commands::Trust(args) => trust_cmd::run_trust(args),
-        Commands::Audit(args) => audit_commands::run_audit(args),
+        Commands::Why(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            run_why(*args)
+        }
+        Commands::Setup(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            run_setup(args)
+        }
+        Commands::Rollback(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            rollback_commands::run_rollback(args)
+        }
+        Commands::Trust(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            trust_cmd::run_trust(args)
+        }
+        Commands::Audit(args) => {
+            show_update_notification(&mut update_handle, cli.silent);
+            audit_commands::run_audit(args)
+        }
+    }
+}
+
+/// Consume an update check handle and print notification if available
+fn show_update_notification(handle: &mut Option<update_check::UpdateCheckHandle>, silent: bool) {
+    if let Some(h) = handle.take() {
+        if let Some(info) = h.take_result() {
+            output::print_update_notification(&info, silent);
+        }
     }
 }
 
